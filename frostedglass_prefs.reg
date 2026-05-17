@@ -1,0 +1,35 @@
+Windows Registry Editor Version 5.00
+
+; Frosted Glass — Wine preferences for the YetiOS desktop session.
+; Applied by frostedglass before launching explorer.exe.
+; Lives at ~/.frostedglass_prefs.reg (falls back to ~/.wslk_prefs.reg)
+
+; --- Desktop appearance ---
+[HKEY_CURRENT_USER\Control Panel\Colors]
+"Background"="58 110 165"
+
+[HKEY_CURRENT_USER\Control Panel\Desktop]
+"Wallpaper"=""
+"WallpaperStyle"="0"
+"TileWallpaper"="0"
+
+; --- Shell = explorer.exe (taskbar + start menu) ---
+[HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\Winlogon]
+"Shell"="explorer.exe"
+
+; --- Force native Wayland driver, no X11 fallback ---
+[HKEY_CURRENT_USER\Software\Wine\Drivers]
+"Graphics"="wayland"
+
+; --- DPI: 96 is 1:1 pixel mapping, no scaling overhead ---
+[HKEY_CURRENT_USER\Software\Wine\Wayland Driver]
+"DPI"="96"
+
+; --- Disable Wine-side decorations (frostedglass draws none either,
+;     so Wine's own Win32 title bars show natively) ---
+[HKEY_CURRENT_USER\Software\Wine\Wayland Driver]
+"Decorations"="N"
+
+; --- High-performance rendering: prefer Vulkan via DXVK when available ---
+[HKEY_CURRENT_USER\Software\Wine\Direct3D]
+"renderer"="vulkan"

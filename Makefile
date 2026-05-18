@@ -34,13 +34,15 @@ XDG_SHELL_XML := $(WAYLAND_PROTOCOLS_DIR)/stable/xdg-shell/xdg-shell.xml
 
 BIN := frostedglass
 
-SRCS := $(SRCDIR)/main.c       \
-        $(SRCDIR)/fg_output.c   \
-        $(SRCDIR)/fg_toplevel.c \
-        $(SRCDIR)/fg_input.c    \
-        $(SRCDIR)/fg_wine.c
+# main.c lives at repo root; modules live in src/
+MODULE_SRCS := $(SRCDIR)/fg_output.c   \
+               $(SRCDIR)/fg_toplevel.c \
+               $(SRCDIR)/fg_input.c    \
+               $(SRCDIR)/fg_wine.c
 
-OBJS := $(SRCS:.c=.o) xdg-shell-protocol.o
+MODULE_OBJS := $(MODULE_SRCS:.c=.o)
+
+OBJS := main.o $(MODULE_OBJS) xdg-shell-protocol.o
 
 HEADERS := $(wildcard $(INCDIR)/*.h)
 
@@ -59,7 +61,12 @@ xdg-shell-protocol.c: xdg-shell-protocol.h
 xdg-shell-protocol.o: xdg-shell-protocol.c xdg-shell-protocol.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# --- Source compilation (all src/*.c depend on headers + protocol) ---
+# --- Compile main.c (repo root) ---
+
+main.o: main.c $(HEADERS) xdg-shell-protocol.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# --- Compile src/*.c modules ---
 
 $(SRCDIR)/%.o: $(SRCDIR)/%.c $(HEADERS) xdg-shell-protocol.h
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -72,7 +79,7 @@ $(BIN): $(OBJS)
 # --- Housekeeping ---
 
 clean:
-	rm -f $(BIN) $(SRCDIR)/*.o xdg-shell-protocol.h xdg-shell-protocol.c xdg-shell-protocol.o
+	rm -f $(BIN) *.o $(SRCDIR)/*.o xdg-shell-protocol.h xdg-shell-protocol.c
 
 install: $(BIN)
 	install -Dm755 $(BIN) $(DESTDIR)$(BINDIR)/$(BIN)

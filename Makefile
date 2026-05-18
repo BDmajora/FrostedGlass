@@ -1,40 +1,46 @@
-project(
-  'frostedglass',
-  'c',
-  version: '0.1.0',
-  license: 'MIT',
-  default_options: [
-    'c_std=c11',
-    'warning_level=2',
-    'werror=false',
-  ],
-)
+# frostedglass — Makefile
+# [cite: 3]
+# Build: make
+# Install: sudo make install
+# Clean: make clean
 
-# wlroots 0.18+ (Gentoo: gui-libs/wlroots)
-wlroots = dependency('wlroots-0.18', version: '>=0.18.0', required: false)
-if not wlroots.found()
-  wlroots = dependency('wlroots', version: '>=0.18.0')
-endif
+CC       ?= gcc
+PKG_CONFIG ?= pkg-config
+PREFIX   ?= /usr/local
+BINDIR   ?= $(PREFIX)/bin
 
-wayland_server  = dependency('wayland-server')
-wayland_protos  = dependency('wayland-protocols')
-xkbcommon       = dependency('xkbcommon')
-pixman          = dependency('pixman-1')
+CFLAGS   ?= -O2 -pipe -Wall -Wextra -Wno-unused-parameter
+CFLAGS   += -std=c11
 
-libdrm   = dependency('libdrm', required: false)
-libinput = dependency('libinput', required: false)
+# Try wlroots-0.18 first, fall back to unversioned
+WLROOTS_PKG := $(shell $(PKG_CONFIG) --exists wlroots-0.18 2>/dev/null && echo wlroots-0.18 || echo wlroots)
 
-executable(
-  'frostedglass',
-  'frostedglass.c',
-  dependencies: [
-    wlroots,
-    wayland_server,
-    xkbcommon,
-    pixman,
-    libdrm,
-    libinput,
-  ],
-  install: true,
-  install_dir: get_option('bindir'),
-)
+PKGS := $(WLROOTS_PKG) wayland-server wayland-protocols xkbcommon pixman-1
+
+# Optional — append only if present
+PKGS += $(shell $(PKG_CONFIG) --exists libdrm 2>/dev/null && echo libdrm)
+PKGS += $(shell $(PKG_CONFIG) --exists libinput 2>/dev/null && echo libinput)
+
+CFLAGS  += $(shell $(PKG_CONFIG) --cflags $(PKGS))
+LDFLAGS += $(shell $(PKG_CONFIG) --libs $(PKGS))
+
+SRC := frostedglass.c
+BIN := frostedglass
+
+.PHONY: all clean install uninstall
+
+all: $(BIN)
+
+$(BIN): $(SRC)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+clean:
+	rm -f $(BIN)
+
+install: $(BIN)
+	install -Dm755 $(BIN) $(DESTDIR)$(BINDIR)/$(BIN)
+	install -Dm644 frostedglass.desktop $(DESTDIR)/usr/share/wayland-sessions/frostedglass.desktop
+
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/$(BIN)
+	rm -f $(DESTDIR)/usr/share/wayland-sessions/frostedglass.desktop

@@ -16,8 +16,11 @@ INCDIR := include
 CFLAGS   ?= -O2 -pipe -Wall -Wextra -Wno-unused-parameter
 CFLAGS   += -std=c11 -DWLR_USE_UNSTABLE -I$(INCDIR) -I.
 
-# Try wlroots-0.18 first, fall back to unversioned
-WLROOTS_PKG := $(shell $(PKG_CONFIG) --exists wlroots-0.18 2>/dev/null && echo wlroots-0.18 || echo wlroots)
+# Try versioned wlroots first (newest → oldest), fall back to unversioned
+WLROOTS_PKG := $(shell \
+  if $(PKG_CONFIG) --exists wlroots-0.20 2>/dev/null; then echo wlroots-0.20; \
+  elif $(PKG_CONFIG) --exists wlroots-0.18 2>/dev/null; then echo wlroots-0.18; \
+  else echo wlroots; fi)
 
 PKGS := $(WLROOTS_PKG) wayland-server wayland-protocols xkbcommon pixman-1
 

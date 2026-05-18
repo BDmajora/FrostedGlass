@@ -10,9 +10,9 @@ WAYLAND_SCANNER ?= wayland-scanner
 PREFIX   ?= /usr/local
 BINDIR   ?= $(PREFIX)/bin
 
-# 1. Added -DWLR_USE_UNSTABLE to silence the wlroots API errors
+# 1. Added -DWLR_USE_UNSTABLE and -I. to silence wlroots errors and find local headers
 CFLAGS   ?= -O2 -pipe -Wall -Wextra -Wno-unused-parameter
-CFLAGS   += -std=c11 -DWLR_USE_UNSTABLE
+CFLAGS   += -std=c11 -DWLR_USE_UNSTABLE -I.
 
 # Try wlroots-0.18 first, fall back to unversioned
 WLROOTS_PKG := $(shell $(PKG_CONFIG) --exists wlroots-0.18 2>/dev/null && echo wlroots-0.18 || echo wlroots)

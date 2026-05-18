@@ -92,7 +92,7 @@ static void begin_interactive(struct fg_toplevel *toplevel,
             toplevel->scene_tree->node.y;
     } else {
         struct wlr_box geo;
-        wlr_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
+        fg_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
         double bx = (toplevel->scene_tree->node.x + geo.x) +
             ((edges & WLR_EDGE_RIGHT)  ? geo.width  : 0);
         double by = (toplevel->scene_tree->node.y + geo.y) +

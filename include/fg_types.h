@@ -136,4 +136,24 @@ struct fg_keyboard {
     struct wl_listener destroy;
 };
 
+/* ------------------------------------------------------------------ */
+/* wlroots version compatibility                                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * wlr_xdg_surface_get_geometry() was removed in wlroots 0.19+.
+ * The geometry is now read directly from the struct field.
+ * WLR_VERSION_MINOR is defined in <wlr/version.h> (0.18+).
+ */
+#include <wlr/version.h>
+
+static inline void fg_xdg_surface_get_geometry(
+    struct wlr_xdg_surface *surface, struct wlr_box *box) {
+#if WLR_VERSION_MINOR < 19
+    wlr_xdg_surface_get_geometry(surface, box);
+#else
+    *box = surface->geometry;
+#endif
+}
+
 #endif /* FG_TYPES_H */

@@ -167,7 +167,7 @@ static void process_cursor_motion(struct fg_server *server,
         }
 
         struct wlr_box geo;
-        wlr_xdg_surface_get_geometry(tl->xdg_toplevel->base, &geo);
+        fg_xdg_surface_get_geometry(tl->xdg_toplevel->base, &geo);
         wlr_scene_node_set_position(&tl->scene_tree->node,
             new_left - geo.x, new_top - geo.y);
         wlr_xdg_toplevel_set_size(tl->xdg_toplevel,

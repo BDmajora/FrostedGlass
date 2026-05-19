@@ -69,13 +69,63 @@ static void apply_registry_prefs(void) {
 
     if (access(reg_path, R_OK) != 0) return;
 
+    wlr_log(WLR_INFO, "Applying Wine registry prefs from %s", reg_path);
+
     pid_t reg_pid = fork();
     if (reg_pid == 0) {
         execlp("wine", "wine", "regedit", "/s", reg_path, NULL);
         _exit(127);
     }
     if (reg_pid > 0) {
-        waitpid(reg_pid, NULL, 0);
+        int status;
+        waitpid(reg_pid, &status, 0);
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            wlr_log(WLR_INFO, "Registry prefs applied successfully");
+        } else {
+            wlr_log(WLR_ERROR, "Registry import exited with status %d",
+                WEXITSTATUS(status));
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Wine prefix initialization check                                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * If the Wine prefix doesn't exist yet, run wineboot --init to create
+ * it. This is separate from the registry import because wineboot needs
+ * to finish before we can import registry files.
+ */
+static void ensure_wine_prefix(void) {
+    const char *home = getenv("HOME");
+    if (!home) return;
+
+    char prefix_check[512];
+    snprintf(prefix_check, sizeof(prefix_check),
+        "%s/.wine/system.reg", home);
+
+    if (access(prefix_check, F_OK) == 0) {
+        wlr_log(WLR_INFO, "Wine prefix exists, skipping wineboot --init");
+        return;
+    }
+
+    wlr_log(WLR_INFO, "Wine prefix not found, running wineboot --init ...");
+
+    pid_t init_pid = fork();
+    if (init_pid == 0) {
+        execlp("wineboot", "wineboot", "--init", NULL);
+        _exit(127);
+    }
+    if (init_pid > 0) {
+        int status;
+        waitpid(init_pid, &status, 0);
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            wlr_log(WLR_INFO, "Wine prefix initialized");
+        } else {
+            wlr_log(WLR_ERROR, "wineboot --init exited with status %d",
+                WEXITSTATUS(status));
+        }
     }
 }
 
@@ -94,6 +144,10 @@ void launch_wine(struct fg_server *server, const char *socket) {
         unsetenv("DISPLAY");
         setenv("WINEWAYLAND", "1", 1);
 
+        /* Ensure prefix exists before doing anything else */
+        ensure_wine_prefix();
+
+        /* Apply registry prefs (taskbar position, DPI, etc.) */
         apply_registry_prefs();
 
         const char *res = server->wine_desktop_res;

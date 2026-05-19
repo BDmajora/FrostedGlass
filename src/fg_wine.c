@@ -67,7 +67,10 @@ static void apply_registry_prefs(void) {
             "%s/.wslk_prefs.reg", home);
     }
 
-    if (access(reg_path, R_OK) != 0) return;
+    if (access(reg_path, R_OK) != 0) {
+        wlr_log(WLR_INFO, "No registry prefs file found, skipping");
+        return;
+    }
 
     wlr_log(WLR_INFO, "Applying Wine registry prefs from %s", reg_path);
 
@@ -85,6 +88,28 @@ static void apply_registry_prefs(void) {
             wlr_log(WLR_ERROR, "Registry import exited with status %d",
                 WEXITSTATUS(status));
         }
+    }
+
+    /*
+     * Force wineserver to shut down and flush all registry changes to
+     * disk.  Without this, explorer.exe may connect to the still-running
+     * wineserver before it has committed our StuckRects2 changes, or
+     * worse, wineserver may re-read stale on-disk state.
+     *
+     * wineserver --wait blocks until the server exits.  The next Wine
+     * process (explorer.exe) will start a fresh wineserver that reads
+     * the now-updated registry files from disk.
+     */
+    wlr_log(WLR_INFO, "Waiting for wineserver to flush registry ...");
+    pid_t ws_pid = fork();
+    if (ws_pid == 0) {
+        execlp("wineserver", "wineserver", "--wait", NULL);
+        _exit(127);
+    }
+    if (ws_pid > 0) {
+        int status;
+        waitpid(ws_pid, &status, 0);
+        wlr_log(WLR_INFO, "wineserver shut down, registry flushed");
     }
 }
 

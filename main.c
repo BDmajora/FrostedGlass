@@ -220,6 +220,26 @@ int main(int argc, char *argv[]) {
 
     wlr_log(WLR_INFO, "frostedglass running on Wayland display %s", socket);
 
+    /*
+     * Auto-detect resolution from the first output if --res was not given.
+     * Wine needs an explicit resolution for /desktop=shell so it can
+     * position the taskbar correctly at the bottom of the screen.
+     * This mirrors what WSLK's autostart script did via wlr-randr.
+     */
+    static char auto_res[32];
+    if (!server.wine_desktop_res && !wl_list_empty(&server.outputs)) {
+        struct fg_output *first_output =
+            wl_container_of(server.outputs.next, first_output, link);
+        struct wlr_output *out = first_output->wlr_output;
+        if (out->width > 0 && out->height > 0) {
+            snprintf(auto_res, sizeof(auto_res), "%dx%d",
+                out->width, out->height);
+            server.wine_desktop_res = auto_res;
+            wlr_log(WLR_INFO, "Auto-detected output resolution: %s",
+                auto_res);
+        }
+    }
+
     launch_wine(&server, socket);
 
     wl_display_run(server.display);

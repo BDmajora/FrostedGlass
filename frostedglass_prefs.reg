@@ -31,11 +31,22 @@ Windows Registry Editor Version 5.00
 ; StuckRects2 is the binary blob that controls taskbar position/size.
 ; This is the Windows XP/2003-era format that Wine's explorer.exe reads.
 ;
-; The binary encodes: docked to bottom edge, always visible, not auto-hide.
-; Wine reads this on startup to position the taskbar.
+; Layout (40 bytes, all little-endian DWORDs):
+;   [0]  cbSize       = 0x28 (40)
+;   [4]  dwMask       = 0xFFFFFFFF
+;   [8]  dwState      = 0x02 (always on top, not auto-hide)
+;   [12] uEdge        = 0x03 (ABE_BOTTOM)
+;   [16] rc.left      = 0
+;   [20] rc.top       = 0x03C2 (962 — placeholder; Wine adjusts to real height)
+;   [24] rc.right     = 0x0780 (1920 — placeholder; Wine adjusts to real width)
+;   [28] rc.bottom    = 0x0438 (1080 — placeholder)
+;   [32] padding      = 0 (8 bytes)
+;
+; Wine reads uEdge to decide docking side. The rect is a hint — Wine
+; recalculates for the actual virtual desktop size.
 [HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects2]
-"Settings"=hex:28,00,00,00,ff,ff,ff,ff,02,00,00,00,03,00,00,00,3e,00,00,00,\
-  2e,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
+"Settings"=hex:28,00,00,00,ff,ff,ff,ff,02,00,00,00,03,00,00,00,00,00,00,00,\
+  c2,03,00,00,80,07,00,00,38,04,00,00,00,00,00,00,00,00,00,00
 
 ; Explorer advanced settings — show file extensions, show hidden files
 [HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced]

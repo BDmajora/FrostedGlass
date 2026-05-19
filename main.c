@@ -42,6 +42,7 @@
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_subcompositor.h>
+#include <wlr/types/wlr_viewporter.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
@@ -110,6 +111,7 @@ static bool server_init(struct fg_server *server) {
 
     wlr_compositor_create(server->display, 6, server->renderer);
     wlr_subcompositor_create(server->display);
+    wlr_viewporter_create(server->display);
     wlr_data_device_manager_create(server->display);
 
     /* Outputs */

@@ -30,12 +30,26 @@ static void sigchld_handler(int sig) {
     int status;
     pid_t pid;
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        /*
+         * Just reap zombies.  We used to terminate the compositor when
+         * wine_pid exited, but Wine's process tree is complex:
+         *
+         *   1. Our fork() child calls execlp("wine", "wine", "explorer"...)
+         *   2. The "wine" launcher may fork internally and exit, so
+         *      wine_pid dies almost immediately — that doesn't mean
+         *      the desktop session is over.
+         *   3. Closing any Win32 app causes Wine subprocesses to exit,
+         *      triggering SIGCHLD — we must not shut down the compositor
+         *      just because a child exited.
+         *
+         * Instead, the compositor runs until Ctrl+Alt+Backspace or until
+         * wl_display_terminate() is called from elsewhere.
+         */
         if (g_server && pid == g_server->wine_pid) {
-            wlr_log(WLR_INFO, "Wine exited (status %d), shutting down",
+            wlr_log(WLR_INFO,
+                "Wine launcher process exited (status %d) — "
+                "this is normal, Wine services continue running",
                 WEXITSTATUS(status));
-            if (g_server->display) {
-                wl_display_terminate(g_server->display);
-            }
         }
     }
 }

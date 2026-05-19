@@ -1,25 +1,166 @@
 /*
- * fg_wine.h — Wine process launcher and lifecycle management.
+ * fg_wine.c — Wine process launcher and SIGCHLD reaping.
+ *
+ * Spawns Wine explorer.exe as the desktop shell, optionally applying
+ * a user registry file first.  A SIGCHLD handler reaps the Wine
+ * process so the compositor can shut down cleanly when Wine exits.
  */
 
-#ifndef FG_WINE_H
-#define FG_WINE_H
+#define _POSIX_C_SOURCE 200809L
 
-#include "fg_types.h"
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+#include <wlr/util/log.h>
+
+#include "fg_wine.h"
+
+/* ------------------------------------------------------------------ */
+/* SIGCHLD — reap Wine and terminate event loop                       */
+/* ------------------------------------------------------------------ */
+
+static struct fg_server *g_server = NULL;
+
+static void sigchld_handler(int sig) {
+    (void)sig;
+    int status;
+    pid_t pid;
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        if (g_server && pid == g_server->wine_pid) {
+            wlr_log(WLR_INFO, "Wine exited (status %d), shutting down",
+                WEXITSTATUS(status));
+            if (g_server->display) {
+                wl_display_terminate(g_server->display);
+            }
+        }
+    }
+}
+
+void wine_install_sigchld(struct fg_server *server) {
+    g_server = server;
+
+    struct sigaction sa = { .sa_handler = sigchld_handler };
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &sa, NULL);
+}
+
+/* ------------------------------------------------------------------ */
+/* Registry preferences                                               */
+/* ------------------------------------------------------------------ */
+
+static void apply_registry_prefs(void) {
+    const char *home = getenv("HOME");
+    if (!home) return;
+
+    char reg_path[512];
+    snprintf(reg_path, sizeof(reg_path),
+        "%s/.frostedglass_prefs.reg", home);
+
+    /* Fall back to legacy name */
+    if (access(reg_path, R_OK) != 0) {
+        snprintf(reg_path, sizeof(reg_path),
+            "%s/.wslk_prefs.reg", home);
+    }
+
+    if (access(reg_path, R_OK) != 0) return;
+
+    wlr_log(WLR_INFO, "Applying Wine registry prefs from %s", reg_path);
+
+    pid_t reg_pid = fork();
+    if (reg_pid == 0) {
+        execlp("wine", "wine", "regedit", "/s", reg_path, NULL);
+        _exit(127);
+    }
+    if (reg_pid > 0) {
+        int status;
+        waitpid(reg_pid, &status, 0);
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            wlr_log(WLR_INFO, "Registry prefs applied successfully");
+        } else {
+            wlr_log(WLR_ERROR, "Registry import exited with status %d",
+                WEXITSTATUS(status));
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Wine prefix initialization check                                   */
+/* ------------------------------------------------------------------ */
 
 /*
- * Fork and exec Wine explorer.exe as the desktop shell.
- * Applies registry preferences from ~/.frostedglass_prefs.reg first.
- * The child process is tracked via server->wine_pid.
+ * If the Wine prefix doesn't exist yet, run wineboot --init to create
+ * it. This is separate from the registry import because wineboot needs
+ * to finish before we can import registry files.
  */
-void launch_wine(struct fg_server *server, const char *socket);
+static void ensure_wine_prefix(void) {
+    const char *home = getenv("HOME");
+    if (!home) return;
 
-/*
- * Install a SIGCHLD handler that reaps Wine and terminates the
- * event loop when Wine exits.  Must be called once before the
- * event loop starts.  Stores a reference to `server` in a file-
- * scoped global (unavoidable with POSIX signal handlers).
- */
-void wine_install_sigchld(struct fg_server *server);
+    char prefix_check[512];
+    snprintf(prefix_check, sizeof(prefix_check),
+        "%s/.wine/system.reg", home);
 
-#endif /* FG_WINE_H */
+    if (access(prefix_check, F_OK) == 0) {
+        wlr_log(WLR_INFO, "Wine prefix exists, skipping wineboot --init");
+        return;
+    }
+
+    wlr_log(WLR_INFO, "Wine prefix not found, running wineboot --init ...");
+
+    pid_t init_pid = fork();
+    if (init_pid == 0) {
+        execlp("wineboot", "wineboot", "--init", NULL);
+        _exit(127);
+    }
+    if (init_pid > 0) {
+        int status;
+        waitpid(init_pid, &status, 0);
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            wlr_log(WLR_INFO, "Wine prefix initialized");
+        } else {
+            wlr_log(WLR_ERROR, "wineboot --init exited with status %d",
+                WEXITSTATUS(status));
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Wine launcher                                                      */
+/* ------------------------------------------------------------------ */
+
+void launch_wine(struct fg_server *server, const char *socket) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        wlr_log(WLR_ERROR, "fork() failed for Wine");
+        return;
+    }
+    if (pid == 0) {
+        setenv("WAYLAND_DISPLAY", socket, 1);
+        unsetenv("DISPLAY");
+        setenv("WINEWAYLAND", "1", 1);
+
+        /* Ensure prefix exists before doing anything else */
+        ensure_wine_prefix();
+
+        /* Apply registry prefs (taskbar position, DPI, etc.) */
+        apply_registry_prefs();
+
+        const char *res = server->wine_desktop_res;
+        if (res) {
+            char desktop_arg[128];
+            snprintf(desktop_arg, sizeof(desktop_arg),
+                "/desktop=shell,%s", res);
+            execlp("wine", "wine", "explorer", desktop_arg, NULL);
+        } else {
+            execlp("wine", "wine", "explorer", "/desktop=shell", NULL);
+        }
+        _exit(127);
+    }
+    server->wine_pid = pid;
+    wlr_log(WLR_INFO, "Wine explorer.exe launched (pid %d)", pid);
+}

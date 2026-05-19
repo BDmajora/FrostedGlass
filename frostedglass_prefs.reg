@@ -4,32 +4,93 @@ Windows Registry Editor Version 5.00
 ; Applied by frostedglass before launching explorer.exe.
 ; Lives at ~/.frostedglass_prefs.reg (falls back to ~/.wslk_prefs.reg)
 
-; --- Desktop appearance ---
+; =======================================================================
+; Desktop appearance — Windows-like look
+; =======================================================================
+
+; Desktop background color: classic Windows blue (RGB 58 110 165)
 [HKEY_CURRENT_USER\Control Panel\Colors]
 "Background"="58 110 165"
 
+; No wallpaper image yet — solid color background.
+; To add a wallpaper later, set Wallpaper to the full path of a .bmp file.
 [HKEY_CURRENT_USER\Control Panel\Desktop]
 "Wallpaper"=""
 "WallpaperStyle"="0"
 "TileWallpaper"="0"
 
-; --- Shell = explorer.exe (taskbar + start menu) ---
+; =======================================================================
+; Explorer shell — taskbar at bottom, full width, Windows behavior
+; =======================================================================
+
+; Shell = explorer.exe (taskbar + start menu)
 [HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\Winlogon]
 "Shell"="explorer.exe"
 
-; --- Force native Wayland driver, no X11 fallback ---
+; Explorer taskbar settings — force bottom, always on top, full width
+; StuckRects2 is the binary blob that controls taskbar position/size.
+; This is the Windows XP/2003-era format that Wine's explorer.exe reads.
+;
+; The binary encodes: docked to bottom edge, always visible, not auto-hide.
+; Wine reads this on startup to position the taskbar.
+[HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects2]
+"Settings"=hex:28,00,00,00,ff,ff,ff,ff,02,00,00,00,03,00,00,00,3e,00,00,00,\
+  2e,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
+
+; Explorer advanced settings — show file extensions, show hidden files
+[HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced]
+"HideFileExt"=dword:00000000
+"Hidden"=dword:00000001
+"TaskbarSizeMove"=dword:00000000
+
+; =======================================================================
+; Window metrics — classic Windows appearance
+; =======================================================================
+
+; Standard Windows metrics for clean appearance
+[HKEY_CURRENT_USER\Control Panel\Desktop\WindowMetrics]
+"BorderWidth"="-15"
+"CaptionHeight"="-330"
+"CaptionWidth"="-330"
+"MenuHeight"="-285"
+"MenuWidth"="-285"
+"ScrollHeight"="-255"
+"ScrollWidth"="-255"
+"SmCaptionHeight"="-225"
+"SmCaptionWidth"="-225"
+
+; =======================================================================
+; Wine driver configuration
+; =======================================================================
+
+; Force native Wayland driver, no X11 fallback
 [HKEY_CURRENT_USER\Software\Wine\Drivers]
 "Graphics"="wayland"
 
-; --- DPI: 96 is 1:1 pixel mapping, no scaling overhead ---
+; DPI: 96 is 1:1 pixel mapping, no scaling overhead
 [HKEY_CURRENT_USER\Software\Wine\Wayland Driver]
 "DPI"="96"
 
-; --- Disable Wine-side decorations (frostedglass draws none either,
-;     so Wine's own Win32 title bars show natively) ---
+; Disable Wine-side decorations (frostedglass draws none either,
+; so Wine's own Win32 title bars show natively)
 [HKEY_CURRENT_USER\Software\Wine\Wayland Driver]
 "Decorations"="N"
 
-; --- High-performance rendering: prefer Vulkan via DXVK when available ---
+; =======================================================================
+; Rendering
+; =======================================================================
+
+; High-performance rendering: prefer Vulkan via DXVK when available
 [HKEY_CURRENT_USER\Software\Wine\Direct3D]
 "renderer"="vulkan"
+
+; =======================================================================
+; Wine desktop mode — let frostedglass control the resolution
+; =======================================================================
+
+; When Wine runs in desktop mode (explorer /desktop=shell,...), it
+; creates a virtual desktop window. These settings configure it.
+; The actual resolution is passed by frostedglass via the --res flag
+; or auto-detected from the output.
+[HKEY_CURRENT_USER\Software\Wine\Explorer\Desktops]
+"Default"=""

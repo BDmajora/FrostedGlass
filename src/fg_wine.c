@@ -91,25 +91,23 @@ static void apply_registry_prefs(void) {
     }
 
     /*
-     * Force wineserver to shut down and flush all registry changes to
-     * disk.  Without this, explorer.exe may connect to the still-running
-     * wineserver before it has committed our StuckRects2 changes, or
-     * worse, wineserver may re-read stale on-disk state.
-     *
-     * wineserver --wait blocks until the server exits.  The next Wine
-     * process (explorer.exe) will start a fresh wineserver that reads
-     * the now-updated registry files from disk.
+     * Kill wineserver so it flushes all registry changes to disk.
+     * --kill sends SIGKILL to the server, which forces an immediate
+     * exit and disk flush.  --wait would be gentler but can hang
+     * indefinitely if the server's persistence timeout hasn't expired.
+     * The next Wine process (explorer.exe) will start a fresh
+     * wineserver that reads the now-updated registry files from disk.
      */
-    wlr_log(WLR_INFO, "Waiting for wineserver to flush registry ...");
+    wlr_log(WLR_INFO, "Killing wineserver to flush registry ...");
     pid_t ws_pid = fork();
     if (ws_pid == 0) {
-        execlp("wineserver", "wineserver", "--wait", NULL);
+        execlp("wineserver", "wineserver", "--kill", NULL);
         _exit(127);
     }
     if (ws_pid > 0) {
         int status;
         waitpid(ws_pid, &status, 0);
-        wlr_log(WLR_INFO, "wineserver shut down, registry flushed");
+        wlr_log(WLR_INFO, "wineserver killed, registry flushed to disk");
     }
 }
 

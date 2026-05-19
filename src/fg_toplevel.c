@@ -10,13 +10,17 @@
 
 #include <assert.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include <wlr/types/wlr_keyboard.h>
+#include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/util/log.h>
 
 #include "fg_toplevel.h"
+#include "fg_output.h"   /* struct fg_output — for screen dimensions */
 
 /* ------------------------------------------------------------------ */
 /* Focus                                                              */
@@ -107,6 +111,62 @@ static void begin_interactive(struct fg_toplevel *toplevel,
 }
 
 /* ------------------------------------------------------------------ */
+/* Taskbar positioning                                                */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Check if a toplevel is Wine's taskbar (Shell_TrayWnd) and, if so,
+ * force it to the bottom of the screen.  This mirrors what WSLK did
+ * via labwc window rules — Wine's own StuckRects2 registry hint is
+ * unreliable under Wayland, so the compositor has to enforce it.
+ *
+ * Wine's Wayland driver sets app_id to the Win32 window class name,
+ * so the taskbar is identified by app_id == "Shell_TrayWnd".
+ */
+static bool is_taskbar(struct wlr_xdg_toplevel *xdg_toplevel) {
+    const char *app_id = xdg_toplevel->app_id;
+    if (!app_id) return false;
+
+    /* Wine may use the exact class name or lowercase variants */
+    if (strcmp(app_id, "Shell_TrayWnd") == 0) return true;
+    if (strcmp(app_id, "shell_traywnd") == 0) return true;
+    if (strcmp(app_id, "explorer.exe") == 0) return true;
+
+    return false;
+}
+
+static void position_taskbar(struct fg_toplevel *toplevel) {
+    struct fg_server *server = toplevel->server;
+
+    /* Find the first output to get screen dimensions */
+    if (wl_list_empty(&server->outputs)) return;
+
+    struct fg_output *first_output =
+        wl_container_of(server->outputs.next, first_output, link);
+    struct wlr_output *output = first_output->wlr_output;
+
+    int screen_w = output->width;
+    int screen_h = output->height;
+
+    /* Get the taskbar's own size */
+    struct wlr_box geo;
+    fg_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
+    int bar_h = geo.height > 0 ? geo.height : 30;
+
+    int target_y = screen_h - bar_h;
+
+    wlr_log(WLR_INFO,
+        "Taskbar detected (app_id=%s, title=%s): "
+        "screen=%dx%d, bar_h=%d, placing at y=%d",
+        toplevel->xdg_toplevel->app_id ?: "(null)",
+        toplevel->xdg_toplevel->title ?: "(null)",
+        screen_w, screen_h, bar_h, target_y);
+
+    wlr_scene_node_set_position(&toplevel->scene_tree->node,
+        0, target_y);
+}
+
+/* ------------------------------------------------------------------ */
 /* Per-toplevel listener callbacks                                    */
 /* ------------------------------------------------------------------ */
 
@@ -114,6 +174,16 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
     struct fg_toplevel *toplevel =
         wl_container_of(listener, toplevel, map);
     wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
+
+    /* Log every mapped surface so we can see what Wine sends */
+    wlr_log(WLR_INFO, "Toplevel mapped: app_id=%s title=%s",
+        toplevel->xdg_toplevel->app_id ?: "(null)",
+        toplevel->xdg_toplevel->title ?: "(null)");
+
+    if (is_taskbar(toplevel->xdg_toplevel)) {
+        position_taskbar(toplevel);
+    }
+
     focus_toplevel(toplevel);
 }
 

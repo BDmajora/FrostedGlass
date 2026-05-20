@@ -182,8 +182,19 @@ static void process_cursor_motion(struct fg_server *server,
             &surface, &sx, &sy);
 
     if (!toplevel) {
-        wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr,
-            "default");
+        /*
+         * No toplevel under the cursor — we're over the compositor's
+         * background rect.  Don't reset to the compositor's default
+         * xcursor here: Wine IS the desktop, and the last cursor Wine
+         * set (via seat_request_cursor) should persist everywhere.
+         * This avoids the jarring cursor flicker when moving between
+         * Wine windows and the background.
+         *
+         * Just clear pointer focus so keystrokes don't go to a window
+         * the user isn't hovering.
+         */
+        wlr_seat_pointer_clear_focus(server->seat);
+        return;
     }
 
     if (surface) {

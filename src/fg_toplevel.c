@@ -209,9 +209,11 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
     wl_list_insert(&server->toplevels, &toplevel->link);
 
     /* Log every mapped surface so we can see what Wine sends */
-    wlr_log(WLR_INFO, "Toplevel mapped: app_id=%s title=%s",
+    wlr_log(WLR_INFO, "Toplevel mapped: app_id=%s title=%s pos=(%d,%d)",
         toplevel->xdg_toplevel->app_id ?: "(null)",
-        toplevel->xdg_toplevel->title ?: "(null)");
+        toplevel->xdg_toplevel->title ?: "(null)",
+        toplevel->scene_tree->node.x,
+        toplevel->scene_tree->node.y);
 
     if (is_taskbar(toplevel->xdg_toplevel)) {
         position_taskbar(toplevel);
@@ -220,36 +222,39 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
     }
 
     /*
-     * Position non-taskbar windows.  Wine's Wayland driver doesn't
-     * set xdg_toplevel position (Wayland has no set_position), so
-     * all windows land at (0,0) by default.  We center them in the
-     * work area (screen minus taskbar) to approximate the Windows
-     * cascading placement.
+     * Wine's Wayland driver positions windows based on Win32
+     * coordinates.  We mostly respect Wine's placement, but enforce
+     * one rule: non-fullscreen windows must not overlap the taskbar.
      *
-     * We read the window's geometry to get its actual size, then
-     * center it.  If the window hasn't committed a size yet, we
-     * skip positioning and let it land at (0,0) — the commit
-     * handler or a subsequent map will fix it.
+     * If a window's bottom edge would extend into the taskbar area,
+     * nudge it upward.  This handles cases like the Run dialog which
+     * Wine places near the taskbar.
      */
     int screen_w, screen_h;
     if (server_get_screen_size(server, &screen_w, &screen_h)) {
-        struct wlr_box geo;
-        fg_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
-
         int bar_h = get_taskbar_height(server);
         int work_h = screen_h - bar_h;
 
-        if (geo.width > 0 && geo.height > 0) {
-            int x = (screen_w - geo.width) / 2;
-            int y = (work_h - geo.height) / 2;
+        struct wlr_box geo;
+        fg_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
 
-            /* Clamp so the window doesn't go off-screen or under taskbar */
-            if (x < 0) x = 0;
-            if (y < 0) y = 0;
-            if (y + geo.height > work_h) y = work_h - geo.height;
-            if (y < 0) y = 0;
+        int node_x = toplevel->scene_tree->node.x;
+        int node_y = toplevel->scene_tree->node.y;
+        int win_bottom = node_y + geo.height;
 
-            wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
+        if (geo.height > 0 && win_bottom > work_h) {
+            /* Push the window up so its bottom edge sits at the
+             * top of the taskbar */
+            int new_y = work_h - geo.height;
+            if (new_y < 0) new_y = 0;
+
+            wlr_log(WLR_INFO,
+                "Clamping window above taskbar: y=%d -> %d "
+                "(win_h=%d, work_h=%d)",
+                node_y, new_y, geo.height, work_h);
+
+            wlr_scene_node_set_position(
+                &toplevel->scene_tree->node, node_x, new_y);
         }
     }
 
@@ -280,6 +285,8 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
     struct fg_toplevel *toplevel =
         wl_container_of(listener, toplevel, commit);
+    struct fg_server *server = toplevel->server;
+
     if (toplevel->xdg_toplevel->base->initial_commit) {
         wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, 0, 0);
         return;
@@ -291,9 +298,41 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
      * when it discovers the real screen resolution), and we need to
      * keep it pinned to the bottom.
      */
-    if (toplevel->server->taskbar == toplevel &&
+    if (server->taskbar == toplevel &&
         toplevel->xdg_toplevel->base->surface->mapped) {
         position_taskbar(toplevel);
+        return;
+    }
+
+    /*
+     * For non-taskbar, non-fullscreen windows: enforce work-area
+     * clamping on every commit.  Wine repositions windows via
+     * subsequent surface commits (Win32 SetWindowPos → Wayland
+     * commit), so we must clamp here too, not just on map.
+     */
+    if (!toplevel->xdg_toplevel->base->surface->mapped) return;
+    if (toplevel->xdg_toplevel->current.fullscreen) return;
+
+    int screen_w, screen_h;
+    if (!server_get_screen_size(server, &screen_w, &screen_h)) return;
+
+    int bar_h = get_taskbar_height(server);
+    if (bar_h <= 0) return;
+
+    int work_h = screen_h - bar_h;
+
+    struct wlr_box geo;
+    fg_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
+    if (geo.height <= 0) return;
+
+    int node_y = toplevel->scene_tree->node.y;
+    int win_bottom = node_y + geo.height;
+
+    if (win_bottom > work_h) {
+        int new_y = work_h - geo.height;
+        if (new_y < 0) new_y = 0;
+        wlr_scene_node_set_position(&toplevel->scene_tree->node,
+            toplevel->scene_tree->node.x, new_y);
     }
 }
 

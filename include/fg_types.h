@@ -75,6 +75,15 @@ struct fg_server {
     struct wlr_box grab_geobox;
     uint32_t resize_edges;
 
+    /* Taskbar tracking — kept separate from the toplevels list so we
+     * can enforce z-order and work-area constraints reliably. */
+    struct fg_toplevel *taskbar;
+
+    /* Desktop background — a solid-color rect in the scene graph that
+     * sits behind all windows.  Created once, resized when outputs
+     * change.  Gives us the classic blue desktop instead of black. */
+    struct wlr_scene_rect *background_rect;
+
     pid_t wine_pid;
     const char *wine_desktop_res;           /* e.g. "1920x1080" or NULL=auto */
 };

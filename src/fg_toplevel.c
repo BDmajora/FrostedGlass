@@ -48,6 +48,18 @@ void focus_toplevel(struct fg_toplevel *toplevel) {
     wl_list_remove(&toplevel->link);
     wl_list_insert(&server->toplevels, &toplevel->link);
 
+    /*
+     * The taskbar must always be the topmost node in the scene graph
+     * so it renders above all windows (like Windows' "always on top"
+     * taskbar behavior).  If we just raised a non-taskbar window,
+     * re-raise the taskbar above it.
+     */
+    if (server->taskbar && toplevel != server->taskbar &&
+        server->taskbar->xdg_toplevel->base->surface->mapped) {
+        wlr_scene_node_raise_to_top(
+            &server->taskbar->scene_tree->node);
+    }
+
     wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, true);
 
     struct wlr_keyboard *kb = wlr_seat_get_keyboard(seat);
@@ -138,17 +150,13 @@ static bool is_taskbar(struct wlr_xdg_toplevel *xdg_toplevel) {
 static void position_taskbar(struct fg_toplevel *toplevel) {
     struct fg_server *server = toplevel->server;
 
-    /* Find the first output to get screen dimensions */
-    if (wl_list_empty(&server->outputs)) return;
+    /* Register this toplevel as THE taskbar */
+    server->taskbar = toplevel;
 
-    struct fg_output *first_output =
-        wl_container_of(server->outputs.next, first_output, link);
-    struct wlr_output *output = first_output->wlr_output;
+    int screen_w, screen_h;
+    if (!server_get_screen_size(server, &screen_w, &screen_h)) return;
 
-    int screen_w = output->width;
-    int screen_h = output->height;
-
-    /* Get the taskbar's own size */
+    /* Get the taskbar's own height from its geometry */
     struct wlr_box geo;
     fg_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
     int bar_h = geo.height > 0 ? geo.height : 30;
@@ -162,8 +170,31 @@ static void position_taskbar(struct fg_toplevel *toplevel) {
         toplevel->xdg_toplevel->title ?: "(null)",
         screen_w, screen_h, bar_h, target_y);
 
+    /* Position at bottom, full width */
     wlr_scene_node_set_position(&toplevel->scene_tree->node,
         0, target_y);
+
+    /* Tell Wine the taskbar should span the full screen width.
+     * This is a hint — Wine may or may not respect it, but it
+     * helps when Wine's own StuckRects2 doesn't have the right
+     * screen dimensions yet. */
+    wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, screen_w, bar_h);
+
+    /* Taskbar is always on top of other windows in z-order */
+    wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
+}
+
+/*
+ * Get the height of the taskbar, or 0 if no taskbar is mapped.
+ * Used to compute the work area for window positioning.
+ */
+static int get_taskbar_height(struct fg_server *server) {
+    if (!server->taskbar) return 0;
+    if (!server->taskbar->xdg_toplevel->base->surface->mapped) return 0;
+
+    struct wlr_box geo;
+    fg_xdg_surface_get_geometry(server->taskbar->xdg_toplevel->base, &geo);
+    return geo.height > 0 ? geo.height : 30;
 }
 
 /* ------------------------------------------------------------------ */
@@ -173,7 +204,9 @@ static void position_taskbar(struct fg_toplevel *toplevel) {
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
     struct fg_toplevel *toplevel =
         wl_container_of(listener, toplevel, map);
-    wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
+    struct fg_server *server = toplevel->server;
+
+    wl_list_insert(&server->toplevels, &toplevel->link);
 
     /* Log every mapped surface so we can see what Wine sends */
     wlr_log(WLR_INFO, "Toplevel mapped: app_id=%s title=%s",
@@ -182,6 +215,42 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
     if (is_taskbar(toplevel->xdg_toplevel)) {
         position_taskbar(toplevel);
+        /* Don't focus the taskbar — it would steal focus from apps */
+        return;
+    }
+
+    /*
+     * Position non-taskbar windows.  Wine's Wayland driver doesn't
+     * set xdg_toplevel position (Wayland has no set_position), so
+     * all windows land at (0,0) by default.  We center them in the
+     * work area (screen minus taskbar) to approximate the Windows
+     * cascading placement.
+     *
+     * We read the window's geometry to get its actual size, then
+     * center it.  If the window hasn't committed a size yet, we
+     * skip positioning and let it land at (0,0) — the commit
+     * handler or a subsequent map will fix it.
+     */
+    int screen_w, screen_h;
+    if (server_get_screen_size(server, &screen_w, &screen_h)) {
+        struct wlr_box geo;
+        fg_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
+
+        int bar_h = get_taskbar_height(server);
+        int work_h = screen_h - bar_h;
+
+        if (geo.width > 0 && geo.height > 0) {
+            int x = (screen_w - geo.width) / 2;
+            int y = (work_h - geo.height) / 2;
+
+            /* Clamp so the window doesn't go off-screen or under taskbar */
+            if (x < 0) x = 0;
+            if (y < 0) y = 0;
+            if (y + geo.height > work_h) y = work_h - geo.height;
+            if (y < 0) y = 0;
+
+            wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
+        }
     }
 
     focus_toplevel(toplevel);
@@ -190,11 +259,22 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
     struct fg_toplevel *toplevel =
         wl_container_of(listener, toplevel, unmap);
-    if (toplevel == toplevel->server->grabbed_toplevel) {
-        toplevel->server->cursor_mode = FG_CURSOR_PASSTHROUGH;
-        toplevel->server->grabbed_toplevel = NULL;
+    struct fg_server *server = toplevel->server;
+
+    if (toplevel == server->grabbed_toplevel) {
+        server->cursor_mode = FG_CURSOR_PASSTHROUGH;
+        server->grabbed_toplevel = NULL;
     }
+
+    /*
+     * Note: we do NOT clear server->taskbar here.  Wine may unmap and
+     * re-map the taskbar (e.g. when it reconfigures itself).  We keep
+     * the pointer so that when it re-maps, position_taskbar() will
+     * re-register it.  The pointer is only cleared on destroy.
+     */
+
     wl_list_remove(&toplevel->link);
+    wl_list_init(&toplevel->link);  /* safe for double-remove */
 }
 
 static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
@@ -202,12 +282,31 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
         wl_container_of(listener, toplevel, commit);
     if (toplevel->xdg_toplevel->base->initial_commit) {
         wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, 0, 0);
+        return;
+    }
+
+    /*
+     * If this is the taskbar and it's mapped, reposition it on every
+     * commit.  Wine may resize the taskbar after the initial map (e.g.
+     * when it discovers the real screen resolution), and we need to
+     * keep it pinned to the bottom.
+     */
+    if (toplevel->server->taskbar == toplevel &&
+        toplevel->xdg_toplevel->base->surface->mapped) {
+        position_taskbar(toplevel);
     }
 }
 
 static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
     struct fg_toplevel *toplevel =
         wl_container_of(listener, toplevel, destroy);
+
+    /* Clear taskbar tracking if this was the taskbar */
+    if (toplevel->server->taskbar == toplevel) {
+        toplevel->server->taskbar = NULL;
+        wlr_log(WLR_INFO, "Taskbar toplevel destroyed");
+    }
+
     wl_list_remove(&toplevel->map.link);
     wl_list_remove(&toplevel->unmap.link);
     wl_list_remove(&toplevel->commit.link);
@@ -238,9 +337,24 @@ static void xdg_toplevel_request_maximize(struct wl_listener *listener,
     void *data) {
     struct fg_toplevel *toplevel =
         wl_container_of(listener, toplevel, request_maximize);
-    if (toplevel->xdg_toplevel->base->surface->mapped) {
-        wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel,
-            toplevel->xdg_toplevel->requested.maximized);
+    struct fg_server *server = toplevel->server;
+
+    if (!toplevel->xdg_toplevel->base->surface->mapped) return;
+
+    if (toplevel->xdg_toplevel->requested.maximized) {
+        /* Maximize into the work area (above the taskbar) */
+        int screen_w, screen_h;
+        if (server_get_screen_size(server, &screen_w, &screen_h)) {
+            int bar_h = get_taskbar_height(server);
+            wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel,
+                screen_w, screen_h - bar_h);
+            wlr_scene_node_set_position(
+                &toplevel->scene_tree->node, 0, 0);
+        }
+        wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, true);
+    } else {
+        wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, false);
+        /* Let Wine handle restoring to the previous size/position */
     }
 }
 
@@ -248,9 +362,30 @@ static void xdg_toplevel_request_fullscreen(struct wl_listener *listener,
     void *data) {
     struct fg_toplevel *toplevel =
         wl_container_of(listener, toplevel, request_fullscreen);
-    if (toplevel->xdg_toplevel->base->surface->mapped) {
-        wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel,
-            toplevel->xdg_toplevel->requested.fullscreen);
+    struct fg_server *server = toplevel->server;
+
+    if (!toplevel->xdg_toplevel->base->surface->mapped) return;
+
+    if (toplevel->xdg_toplevel->requested.fullscreen) {
+        int screen_w, screen_h;
+        if (server_get_screen_size(server, &screen_w, &screen_h)) {
+            wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel,
+                screen_w, screen_h);
+            wlr_scene_node_set_position(
+                &toplevel->scene_tree->node, 0, 0);
+            /* Raise above taskbar for true fullscreen */
+            wlr_scene_node_raise_to_top(
+                &toplevel->scene_tree->node);
+        }
+        wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel, true);
+    } else {
+        wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel, false);
+        /* Restore taskbar on top */
+        if (server->taskbar &&
+            server->taskbar->xdg_toplevel->base->surface->mapped) {
+            wlr_scene_node_raise_to_top(
+                &server->taskbar->scene_tree->node);
+        }
     }
 }
 

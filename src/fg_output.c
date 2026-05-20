@@ -7,6 +7,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <time.h>
 
@@ -42,11 +43,76 @@ static void output_request_state(struct wl_listener *listener, void *data) {
 
 static void output_destroy(struct wl_listener *listener, void *data) {
     struct fg_output *output = wl_container_of(listener, output, destroy);
+    struct fg_server *server = output->server;
     wl_list_remove(&output->frame.link);
     wl_list_remove(&output->request_state.link);
     wl_list_remove(&output->destroy.link);
     wl_list_remove(&output->link);
     free(output);
+
+    /* Resize background to remaining outputs */
+    server_update_background(server);
+}
+
+/* ------------------------------------------------------------------ */
+/* Screen dimension helpers                                           */
+/* ------------------------------------------------------------------ */
+
+bool server_get_screen_size(struct fg_server *server, int *w, int *h) {
+    if (wl_list_empty(&server->outputs)) return false;
+
+    struct fg_output *first =
+        wl_container_of(server->outputs.next, first, link);
+    struct wlr_output *out = first->wlr_output;
+    if (out->width <= 0 || out->height <= 0) return false;
+
+    *w = out->width;
+    *h = out->height;
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Desktop background                                                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Classic Windows desktop blue: RGB(58, 110, 165).
+ * This is what Wine's "Background" registry key maps to, but Wine
+ * only paints it inside its own virtual desktop surface.  Since we
+ * run individual xdg_toplevels (no Wine virtual desktop surface for
+ * the background), we need the compositor to paint it.
+ */
+void server_update_background(struct fg_server *server) {
+    int total_w = 0, total_h = 0;
+
+    /* Union of all output rects — covers the whole layout */
+    struct fg_output *out;
+    wl_list_for_each(out, &server->outputs, link) {
+        struct wlr_output *o = out->wlr_output;
+        if (o->width > total_w) total_w = o->width;
+        if (o->height > total_h) total_h = o->height;
+    }
+
+    if (total_w <= 0 || total_h <= 0) return;
+
+    /* Classic Windows blue */
+    float color[4] = { 58.0f/255.0f, 110.0f/255.0f, 165.0f/255.0f, 1.0f };
+
+    if (!server->background_rect) {
+        server->background_rect = wlr_scene_rect_create(
+            &server->scene->tree, total_w, total_h, color);
+        /* Push to the very bottom of the scene graph so it's behind
+         * every window */
+        wlr_scene_node_lower_to_bottom(
+            &server->background_rect->node);
+        wlr_log(WLR_INFO, "Background rect created: %dx%d", total_w, total_h);
+    } else {
+        wlr_scene_rect_set_size(server->background_rect, total_w, total_h);
+        wlr_scene_rect_set_color(server->background_rect, color);
+        wlr_scene_node_lower_to_bottom(
+            &server->background_rect->node);
+        wlr_log(WLR_INFO, "Background rect resized: %dx%d", total_w, total_h);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -91,4 +157,7 @@ void server_new_output(struct wl_listener *listener, void *data) {
         wlr_scene_output_create(server->scene, wlr_output);
     wlr_scene_output_layout_add_output(server->scene_layout, lo,
         output->scene_output);
+
+    /* (Re-)create or resize the desktop background to cover all outputs */
+    server_update_background(server);
 }

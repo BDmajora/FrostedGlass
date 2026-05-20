@@ -184,8 +184,18 @@ static void position_taskbar(struct fg_toplevel *toplevel) {
      * screen dimensions yet. */
     wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, screen_w, bar_h);
 
-    /* Taskbar is always on top of other windows in z-order */
-    wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
+    /*
+     * DO NOT raise_to_top here.  position_taskbar() is called on every
+     * taskbar commit (clock tick, cursor change, etc.).  Raising on
+     * every commit buries the currently focused window (Run dialog,
+     * file browser, etc.) under the taskbar — that was the z-order
+     * inversion bug.
+     *
+     * The taskbar is raised once on its initial map (see
+     * xdg_toplevel_map).  After that, focus_toplevel() raises the
+     * focused window above it, and we never push the taskbar back
+     * on top.
+     */
 }
 
 /*
@@ -221,6 +231,10 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
     if (is_taskbar(toplevel->xdg_toplevel)) {
         position_taskbar(toplevel);
+        /* Raise the taskbar above all existing windows ONCE on initial
+         * map.  This is the only place we set the taskbar's z-order.
+         * position_taskbar() no longer raises — see the comment there. */
+        wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
         /* Don't focus the taskbar — it would steal focus from apps */
         return;
     }
@@ -253,6 +267,10 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
          * always CW_USEDEFAULT windows that Wine couldn't cascade.
          * Skip if the window is larger than the work area (likely
          * maximized or fullscreen).
+         *
+         * If the geometry isn't ready yet (width/height == 0), leave
+         * centered = false so the commit handler can center it later
+         * once Wine commits a buffer with real dimensions.
          */
         if (node_x == 0 && node_y == 0 &&
             geo.width > 0 && geo.height > 0 &&
@@ -266,21 +284,32 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
             wlr_scene_node_set_position(
                 &toplevel->scene_tree->node, node_x, node_y);
+            toplevel->centered = true;
+        } else if (geo.width > 0 && geo.height > 0) {
+            /* Window has valid geometry but doesn't need centering
+             * (already positioned, or too large).  Mark as done. */
+            toplevel->centered = true;
         }
+        /* else: geo not ready yet — leave centered = false for
+         * deferred centering in the commit handler. */
 
         /* Clamp: don't let the window overlap the taskbar */
-        int win_bottom = node_y + geo.height;
-        if (geo.height > 0 && win_bottom > work_h) {
-            int new_y = work_h - geo.height;
-            if (new_y < 0) new_y = 0;
+        if (geo.height > 0) {
+            int win_bottom = toplevel->scene_tree->node.y + geo.height;
+            if (win_bottom > work_h) {
+                int new_y = work_h - geo.height;
+                if (new_y < 0) new_y = 0;
 
-            wlr_log(WLR_INFO,
-                "Clamping window above taskbar: y=%d -> %d "
-                "(win_h=%d, work_h=%d)",
-                node_y, new_y, geo.height, work_h);
+                wlr_log(WLR_INFO,
+                    "Clamping window above taskbar: y=%d -> %d "
+                    "(win_h=%d, work_h=%d)",
+                    toplevel->scene_tree->node.y, new_y,
+                    geo.height, work_h);
 
-            wlr_scene_node_set_position(
-                &toplevel->scene_tree->node, node_x, new_y);
+                wlr_scene_node_set_position(
+                    &toplevel->scene_tree->node,
+                    toplevel->scene_tree->node.x, new_y);
+            }
         }
     }
 
@@ -364,6 +393,11 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
      * commit.  Wine may resize the taskbar after the initial map (e.g.
      * when it discovers the real screen resolution), and we need to
      * keep it pinned to the bottom.
+     *
+     * NOTE: position_taskbar() only sets the position — it does NOT
+     * call raise_to_top.  The taskbar was raised once on its initial
+     * map and stays at that z-level.  This is the fix for the z-order
+     * inversion bug where the Run dialog appeared behind the taskbar.
      */
     if (server->taskbar == toplevel &&
         toplevel->xdg_toplevel->base->surface->mapped) {
@@ -384,33 +418,117 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
     if (!server_get_screen_size(server, &screen_w, &screen_h)) return;
 
     int bar_h = get_taskbar_height(server);
-    if (bar_h <= 0) return;
-
-    int work_h = screen_h - bar_h;
+    int work_h = (bar_h > 0) ? (screen_h - bar_h) : screen_h;
 
     struct wlr_box geo;
     fg_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
-    if (geo.height <= 0) return;
+    if (geo.height <= 0 || geo.width <= 0) return;
 
-    int node_y = toplevel->scene_tree->node.y;
-    int win_bottom = node_y + geo.height;
+    /*
+     * Deferred centering: if the window's geometry wasn't ready at map
+     * time (width/height were 0), the map handler left centered=false.
+     * Now that we have a valid geometry, center it if it's still at the
+     * origin and small enough to need centering.
+     */
+    if (!toplevel->centered) {
+        int node_x = toplevel->scene_tree->node.x;
+        int node_y = toplevel->scene_tree->node.y;
 
-    if (win_bottom > work_h) {
-        int new_y = work_h - geo.height;
-        if (new_y < 0) new_y = 0;
-        wlr_scene_node_set_position(&toplevel->scene_tree->node,
-            toplevel->scene_tree->node.x, new_y);
+        if (node_x == 0 && node_y == 0 &&
+            geo.width < screen_w && geo.height < work_h) {
+            node_x = (screen_w - geo.width) / 2;
+            node_y = (work_h - geo.height) / 2;
+
+            wlr_log(WLR_INFO,
+                "Deferred centering: (%d,%d) size=%dx%d",
+                node_x, node_y, geo.width, geo.height);
+
+            wlr_scene_node_set_position(
+                &toplevel->scene_tree->node, node_x, node_y);
+        }
+        toplevel->centered = true;
+    }
+
+    /* Clamp: don't let the window overlap the taskbar */
+    if (bar_h > 0) {
+        int node_y = toplevel->scene_tree->node.y;
+        int win_bottom = node_y + geo.height;
+
+        if (win_bottom > work_h) {
+            int new_y = work_h - geo.height;
+            if (new_y < 0) new_y = 0;
+            wlr_scene_node_set_position(&toplevel->scene_tree->node,
+                toplevel->scene_tree->node.x, new_y);
+        }
     }
 }
 
 static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
     struct fg_toplevel *toplevel =
         wl_container_of(listener, toplevel, destroy);
+    struct fg_server *server = toplevel->server;
+
+    /* Clear grab if we were being dragged/resized */
+    if (toplevel == server->grabbed_toplevel) {
+        server->cursor_mode = FG_CURSOR_PASSTHROUGH;
+        server->grabbed_toplevel = NULL;
+    }
 
     /* Clear taskbar tracking if this was the taskbar */
-    if (toplevel->server->taskbar == toplevel) {
-        toplevel->server->taskbar = NULL;
+    if (server->taskbar == toplevel) {
+        server->taskbar = NULL;
         wlr_log(WLR_INFO, "Taskbar toplevel destroyed");
+    }
+
+    /*
+     * CRITICAL: Remove from the toplevels list.
+     *
+     * The unmap handler already removes the link and re-inits it, so
+     * in the normal unmap→destroy sequence this is a no-op (removing
+     * a self-linked node).  But if destroy fires WITHOUT a preceding
+     * unmap (wlroots edge case, client disconnect, etc.), the link is
+     * still in the live list — freeing the toplevel without removing
+     * it first leaves a dangling pointer that corrupts the list and
+     * crashes the compositor on the next iteration.
+     */
+    wl_list_remove(&toplevel->link);
+
+    /*
+     * CRITICAL: Transfer keyboard focus.
+     *
+     * If this was the focused surface (or nothing is focused), we
+     * must send wl_keyboard.enter to another surface immediately.
+     * Without this, Wine's Wayland driver sees "no keyboard focus",
+     * interprets it as "session dead", and calls ExitProcess() —
+     * killing every Wine window including the taskbar.
+     *
+     * This mirrors the logic in xdg_toplevel_unmap but guards against
+     * the destroy-without-unmap edge case.
+     */
+    struct wlr_surface *focused =
+        server->seat->keyboard_state.focused_surface;
+    if (focused == toplevel->xdg_toplevel->base->surface || !focused) {
+        struct fg_toplevel *next;
+        bool refocused = false;
+        /* Prefer a non-taskbar window */
+        wl_list_for_each(next, &server->toplevels, link) {
+            if (next == server->taskbar) continue;
+            if (next->xdg_toplevel->base->surface->mapped) {
+                focus_toplevel(next);
+                refocused = true;
+                break;
+            }
+        }
+        /* Fall back to the taskbar */
+        if (!refocused && server->taskbar &&
+            server->taskbar->xdg_toplevel->base->surface->mapped) {
+            focus_toplevel(server->taskbar);
+            refocused = true;
+        }
+        /* Nothing left — clear cleanly */
+        if (!refocused) {
+            wlr_seat_keyboard_clear_focus(server->seat);
+        }
     }
 
     wl_list_remove(&toplevel->map.link);

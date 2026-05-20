@@ -121,6 +121,10 @@ struct fg_toplevel {
     struct wlr_xdg_toplevel *xdg_toplevel;
     struct wlr_scene_tree *scene_tree;
 
+    /* Set once the compositor has centered this window (or decided not
+     * to).  Prevents re-centering on every subsequent commit. */
+    bool centered;
+
     struct wl_listener map;
     struct wl_listener unmap;
     struct wl_listener commit;

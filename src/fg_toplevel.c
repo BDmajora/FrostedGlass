@@ -141,10 +141,12 @@ static bool is_taskbar(struct wlr_xdg_toplevel *xdg_toplevel) {
     const char *app_id = xdg_toplevel->app_id;
     if (!app_id) return false;
 
-    /* Wine may use the exact class name or lowercase variants */
+    /* Wine's Wayland driver sets app_id to the Win32 window class name.
+     * Only match the actual taskbar class — do NOT match "explorer.exe"
+     * because that would catch every window created by the explorer
+     * process (Run dialog, file browser, shell dialogs, etc.). */
     if (strcmp(app_id, "Shell_TrayWnd") == 0) return true;
     if (strcmp(app_id, "shell_traywnd") == 0) return true;
-    if (strcmp(app_id, "explorer.exe") == 0) return true;
 
     return false;
 }
@@ -304,6 +306,47 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 
     wl_list_remove(&toplevel->link);
     wl_list_init(&toplevel->link);  /* safe for double-remove */
+
+    /*
+     * CRITICAL: Focus the next available toplevel.
+     *
+     * Without this, after a window closes the keyboard focus stays on
+     * the now-dead surface.  Wine never receives wl_keyboard.enter for
+     * any remaining window, interprets "no focused window" as "session
+     * over", and calls ExitProcess() — killing every Wine window
+     * including the taskbar.
+     *
+     * Every production compositor (sway, labwc, mutter, etc.) refocuses
+     * the next window when the focused one closes.  We must do the same.
+     *
+     * Strategy:
+     *   1. Try to focus the next regular (non-taskbar) mapped toplevel.
+     *   2. If none found, focus the taskbar — it must ALWAYS keep focus
+     *      as a last resort so Wine never sees an empty focus state.
+     *   3. Only clear focus if literally nothing is mapped (impossible
+     *      while the taskbar exists).
+     */
+    struct wlr_surface *focused = server->seat->keyboard_state.focused_surface;
+    if (focused == toplevel->xdg_toplevel->base->surface || !focused) {
+        /* Pass 1: prefer a non-taskbar window */
+        struct fg_toplevel *next;
+        wl_list_for_each(next, &server->toplevels, link) {
+            if (next == server->taskbar) continue;
+            if (next->xdg_toplevel->base->surface->mapped) {
+                focus_toplevel(next);
+                return;
+            }
+        }
+        /* Pass 2: fall back to the taskbar — it must never lose focus
+         * as the last remaining window, or Wine will exit. */
+        if (server->taskbar &&
+            server->taskbar->xdg_toplevel->base->surface->mapped) {
+            focus_toplevel(server->taskbar);
+            return;
+        }
+        /* Nothing mapped at all — clear focus cleanly */
+        wlr_seat_keyboard_clear_focus(server->seat);
+    }
 }
 
 static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {

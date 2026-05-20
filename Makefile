@@ -40,6 +40,7 @@ BIN := frostedglass
 # main.c lives at repo root; modules live in src/
 MODULE_SRCS := $(SRCDIR)/fg_output.c   \
                $(SRCDIR)/fg_toplevel.c \
+               $(SRCDIR)/fg_taskbar.c  \
                $(SRCDIR)/fg_input.c    \
                $(SRCDIR)/fg_wine.c
 

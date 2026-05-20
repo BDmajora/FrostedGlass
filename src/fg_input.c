@@ -184,18 +184,35 @@ static void process_cursor_motion(struct fg_server *server,
     if (!toplevel) {
         /*
          * No toplevel under the cursor — we're over the compositor's
-         * background rect.  Don't reset to the compositor's default
-         * xcursor here: Wine IS the desktop, and the last cursor Wine
-         * set (via seat_request_cursor) should persist everywhere.
-         * This avoids the jarring cursor flicker when moving between
-         * Wine windows and the background.
+         * background rect.
          *
-         * Just clear pointer focus so keystrokes don't go to a window
-         * the user isn't hovering.
+         * We must explicitly set a cursor here.  Wine's wayland driver
+         * only calls wl_pointer_set_cursor() when one of its own
+         * surfaces holds pointer focus (see wayland_pointer.c:
+         * `if (pointer->focused_hwnd == hwnd)`).  Over our background
+         * rect there is no Wine surface to focus, so Wine never gets
+         * a chance — and without a fresh set_cursor request, whatever
+         * the kernel/libinput last set (or the wlroots default theme
+         * arrow that visually mismatches Wine's arrow) wins.
+         *
+         * Set "default" from the xcursor theme only on the transition
+         * into the background (not every pixel of motion) to avoid
+         * spamming the cursor manager.  The "desktop_cursor_set" flag
+         * is reset whenever the pointer enters a Wine surface.
          */
+        if (!server->desktop_cursor_set) {
+            wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr,
+                "default");
+            server->desktop_cursor_set = true;
+        }
         wlr_seat_pointer_clear_focus(server->seat);
         return;
     }
+
+    /* Cursor is over a Wine surface — Wine will set its own cursor
+     * via seat_request_cursor.  Reset the flag so we'll re-apply the
+     * desktop cursor next time we cross back onto the background. */
+    server->desktop_cursor_set = false;
 
     if (surface) {
         wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);

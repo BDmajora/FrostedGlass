@@ -8,6 +8,8 @@
 #ifndef FG_TYPES_H
 #define FG_TYPES_H
 
+#include <stdbool.h>
+
 #include <wayland-server-core.h>
 
 #include <wlr/backend.h>
@@ -83,6 +85,13 @@ struct fg_server {
      * sits behind all windows.  Created once, resized when outputs
      * change.  Gives us the classic blue desktop instead of black. */
     struct wlr_scene_rect *background_rect;
+
+    /* Tracks whether the compositor has set the xcursor "default"
+     * image for the background rect.  Used to avoid spamming
+     * wlr_cursor_set_xcursor() on every motion event over the
+     * background; we only set it on the transition into the
+     * background, and reset it on any motion over a Wine surface. */
+    bool desktop_cursor_set;
 
     pid_t wine_pid;
     const char *wine_desktop_res;           /* e.g. "1920x1080" or NULL=auto */

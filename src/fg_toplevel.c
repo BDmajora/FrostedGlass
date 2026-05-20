@@ -38,7 +38,14 @@ void focus_toplevel(struct fg_toplevel *toplevel) {
 
     if (prev_surface == surface) return;
 
-    if (prev_surface) {
+    /*
+     * Deactivate the previously focused toplevel, but ONLY if it's
+     * still mapped.  If it's mid-teardown (unmapping/destroying),
+     * wlr_xdg_toplevel_set_activated sends a configure event to a
+     * dying surface — Wine receives it, tries to process it on a
+     * half-destroyed Win32 window, and crashes.
+     */
+    if (prev_surface && prev_surface->mapped) {
         struct wlr_xdg_toplevel *prev =
             wlr_xdg_toplevel_try_from_wlr_surface(prev_surface);
         if (prev) wlr_xdg_toplevel_set_activated(prev, false);
@@ -65,6 +72,16 @@ void focus_toplevel(struct fg_toplevel *toplevel) {
  */
 static void refocus_next(struct fg_server *server,
     struct fg_toplevel *exclude) {
+    /*
+     * Clear the stale keyboard focus FIRST.  This sends a clean
+     * wl_keyboard.leave to Wine before we send wl_keyboard.enter
+     * for the next surface.  Without this, Wine may receive a
+     * configure event (from set_activated(false)) on a surface
+     * that's being torn down, which crashes the Win32 window
+     * manager and kills the entire session.
+     */
+    wlr_seat_keyboard_clear_focus(server->seat);
+
     struct fg_toplevel *next;
 
     /* Pass 1: prefer non-taskbar */
@@ -82,7 +99,7 @@ static void refocus_next(struct fg_server *server,
         focus_toplevel(server->taskbar);
         return;
     }
-    wlr_seat_keyboard_clear_focus(server->seat);
+    /* Nothing left — focus already cleared above */
 }
 
 /* ------------------------------------------------------------------ */
@@ -241,6 +258,10 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
         wl_container_of(listener, toplevel, unmap);
     struct fg_server *server = toplevel->server;
 
+    wlr_log(WLR_INFO, "Toplevel unmapped: app_id=%s title=\"%s\"",
+        toplevel->xdg_toplevel->app_id ?: "(null)",
+        toplevel->xdg_toplevel->title ?: "");
+
     if (toplevel == server->grabbed_toplevel) {
         server->cursor_mode = FG_CURSOR_PASSTHROUGH;
         server->grabbed_toplevel = NULL;
@@ -249,11 +270,14 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
     wl_list_remove(&toplevel->link);
     wl_list_init(&toplevel->link);
 
-    /* Transfer focus so Wine doesn't see empty focus and ExitProcess */
-    struct wlr_surface *focused =
-        server->seat->keyboard_state.focused_surface;
-    if (focused == toplevel->xdg_toplevel->base->surface || !focused)
-        refocus_next(server, toplevel);
+    /*
+     * Transfer focus so Wine doesn't see empty focus and ExitProcess.
+     * We ALWAYS try to refocus when a surface unmaps, not just when it
+     * was the focused one — Wine's internal focus tracking may differ
+     * from the compositor's, and we need to ensure SOME surface has
+     * keyboard focus at all times while Wine is running.
+     */
+    refocus_next(server, toplevel);
 }
 
 static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
@@ -289,6 +313,9 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
         wl_container_of(listener, toplevel, destroy);
     struct fg_server *server = toplevel->server;
 
+    wlr_log(WLR_INFO, "Toplevel destroyed: app_id=%s",
+        toplevel->xdg_toplevel->app_id ?: "(null)");
+
     if (toplevel == server->grabbed_toplevel) {
         server->cursor_mode = FG_CURSOR_PASSTHROUGH;
         server->grabbed_toplevel = NULL;
@@ -298,19 +325,10 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
         wlr_log(WLR_INFO, "Taskbar destroyed");
     }
 
-    /*
-     * Remove from toplevels list.  In the normal unmap→destroy path
-     * the link is already self-linked (safe no-op).  But if destroy
-     * fires without unmap (client disconnect), this prevents a
-     * dangling pointer that would crash the compositor.
-     */
     wl_list_remove(&toplevel->link);
 
-    /* Transfer focus — same reason as unmap */
-    struct wlr_surface *focused =
-        server->seat->keyboard_state.focused_surface;
-    if (focused == toplevel->xdg_toplevel->base->surface || !focused)
-        refocus_next(server, toplevel);
+    /* Always refocus — same logic as unmap */
+    refocus_next(server, toplevel);
 
     wl_list_remove(&toplevel->map.link);
     wl_list_remove(&toplevel->unmap.link);

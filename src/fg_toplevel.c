@@ -49,16 +49,18 @@ void focus_toplevel(struct fg_toplevel *toplevel) {
     wl_list_insert(&server->toplevels, &toplevel->link);
 
     /*
-     * The taskbar must always be the topmost node in the scene graph
-     * so it renders above all windows (like Windows' "always on top"
-     * taskbar behavior).  If we just raised a non-taskbar window,
-     * re-raise the taskbar above it.
+     * Windows-like taskbar z-order: the taskbar is "always on top"
+     * relative to unfocused windows, but the actively focused window
+     * is above the taskbar.  This matches Windows behavior where the
+     * Run dialog (and any focused app) renders in front of the
+     * taskbar.
+     *
+     * We achieve this by NOT re-raising the taskbar here.  The
+     * focused window was just raised to the top, so it's above the
+     * taskbar.  The taskbar stays above all other (unfocused) windows
+     * because it was raised on its initial map and only the focused
+     * window gets raised above it.
      */
-    if (server->taskbar && toplevel != server->taskbar &&
-        server->taskbar->xdg_toplevel->base->surface->mapped) {
-        wlr_scene_node_raise_to_top(
-            &server->taskbar->scene_tree->node);
-    }
 
     wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, true);
 
@@ -223,12 +225,15 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
     /*
      * Wine's Wayland driver positions windows based on Win32
-     * coordinates.  We mostly respect Wine's placement, but enforce
-     * one rule: non-fullscreen windows must not overlap the taskbar.
+     * coordinates.  We handle two cases:
      *
-     * If a window's bottom edge would extend into the taskbar area,
-     * nudge it upward.  This handles cases like the Run dialog which
-     * Wine places near the taskbar.
+     * 1. Windows at (0,0): Wine maps CW_USEDEFAULT to (0,0) on
+     *    Wayland because there's no cascading position logic in the
+     *    Wayland driver.  Center these in the work area, like
+     *    Windows 10 does.
+     *
+     * 2. Windows overlapping the taskbar: nudge them upward so
+     *    their bottom edge doesn't extend into the taskbar area.
      */
     int screen_w, screen_h;
     if (server_get_screen_size(server, &screen_w, &screen_h)) {
@@ -240,11 +245,30 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
         int node_x = toplevel->scene_tree->node.x;
         int node_y = toplevel->scene_tree->node.y;
-        int win_bottom = node_y + geo.height;
 
+        /*
+         * Center windows that appear at (0,0).  These are almost
+         * always CW_USEDEFAULT windows that Wine couldn't cascade.
+         * Skip if the window is larger than the work area (likely
+         * maximized or fullscreen).
+         */
+        if (node_x == 0 && node_y == 0 &&
+            geo.width > 0 && geo.height > 0 &&
+            geo.width < screen_w && geo.height < work_h) {
+            node_x = (screen_w - geo.width) / 2;
+            node_y = (work_h - geo.height) / 2;
+
+            wlr_log(WLR_INFO,
+                "Centering window in work area: (%d,%d) size=%dx%d",
+                node_x, node_y, geo.width, geo.height);
+
+            wlr_scene_node_set_position(
+                &toplevel->scene_tree->node, node_x, node_y);
+        }
+
+        /* Clamp: don't let the window overlap the taskbar */
+        int win_bottom = node_y + geo.height;
         if (geo.height > 0 && win_bottom > work_h) {
-            /* Push the window up so its bottom edge sits at the
-             * top of the taskbar */
             int new_y = work_h - geo.height;
             if (new_y < 0) new_y = 0;
 

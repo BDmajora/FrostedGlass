@@ -379,9 +379,19 @@ static void xdg_toplevel_unmap(struct wl_listener *listener,
     }
 
     /*
-     * Refocus another mapped window immediately.
+     * Do NOT refocus here.
+     *
+     * wlr_seat_keyboard_notify_enter() sends wl_keyboard::leave
+     * to the currently focused surface before entering the new one.
+     * During unmap, the dying surface is still the focused surface,
+     * so the leave event hits a HWND that Wine is mid-destroying.
+     * Wine's Wayland driver interprets that as session teardown
+     * and kills all Wine processes.
+     *
+     * Refocusing is deferred to xdg_toplevel_destroy(), where the
+     * old surface is fully dead and wlroots won't try to deliver
+     * protocol events to it.
      */
-    refocus_next(server, toplevel);
 }
 
 static void xdg_toplevel_commit(struct wl_listener *listener,
@@ -453,12 +463,14 @@ static void xdg_toplevel_destroy(struct wl_listener *listener,
      */
 
     /*
-     * Only refocus if no focused surface exists.
-     * Avoid duplicate focus churn during teardown.
+     * Refocus now — the unmap handler defers this to here so that
+     * no keyboard leave/enter events hit a surface mid-teardown.
+     *
+     * By destroy time the old surface's Wayland resources are being
+     * torn down, so wlr_seat_keyboard_notify_enter() won't deliver
+     * a leave event to it.  Safe to refocus.
      */
-    if (!server->seat->keyboard_state.focused_surface) {
-        refocus_next(server, toplevel);
-    }
+    refocus_next(server, toplevel);
 
     wl_list_remove(&toplevel->map.link);
     wl_list_remove(&toplevel->unmap.link);

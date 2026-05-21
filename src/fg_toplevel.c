@@ -40,28 +40,10 @@ void focus_toplevel(struct fg_toplevel *toplevel) {
         !toplevel->xdg_toplevel->base->surface->mapped)
         return;
 
-    struct wlr_surface *prev_surface =
-        seat->keyboard_state.focused_surface;
-
     struct wlr_surface *surface =
         toplevel->xdg_toplevel->base->surface;
 
-    if (prev_surface == surface) return;
-
-    /*
-     * Deactivate the previous toplevel only if still mapped.
-     * Avoid configure events racing destroyed Wine HWNDs.
-     */
-    if (prev_surface && prev_surface->mapped) {
-        struct wlr_xdg_toplevel *prev =
-            wlr_xdg_toplevel_try_from_wlr_surface(prev_surface);
-
-        if (prev && prev->base &&
-            prev->base->surface &&
-            prev->base->surface->mapped) {
-            wlr_xdg_toplevel_set_activated(prev, false);
-        }
-    }
+    if (seat->keyboard_state.focused_surface == surface) return;
 
     wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
 
@@ -76,6 +58,20 @@ void focus_toplevel(struct fg_toplevel *toplevel) {
         wl_list_insert(&server->toplevels, &toplevel->link);
     }
 
+    /*
+     * ONLY activate the new surface.
+     * Do NOT explicitly deactivate the old one.
+     *
+     * Wine's Wayland backend is extremely sensitive to
+     * deactivate/configure events during teardown.  Sending
+     * set_activated(false) to a surface that is mid-destruction
+     * triggers Wine's session/shell teardown logic, killing ALL
+     * Wine processes — not just the closing window.
+     *
+     * The Wayland protocol allows implicit deactivation: activating
+     * the new toplevel is sufficient; the old one loses activated
+     * state when it stops receiving keyboard focus.
+     */
     wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, true);
 
     struct wlr_keyboard *kb = wlr_seat_get_keyboard(seat);

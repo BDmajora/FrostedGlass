@@ -8,6 +8,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -180,6 +181,39 @@ void launch_wine(struct fg_server *server, const char *socket) {
         setenv("WAYLAND_DISPLAY", socket, 1);
         unsetenv("DISPLAY");
         setenv("WINEWAYLAND", "1", 1);
+
+        /*
+         * ---- DIAGNOSTIC LOGGING ----------------------------------------
+         *
+         * WAYLAND_DEBUG=1  — Wine's Wayland driver logs every protocol
+         *   request and event to stderr.  When the compositor posts a fatal
+         *   protocol error the last few lines name the exact object and call
+         *   that triggered it.
+         *
+         * WINEDEBUG=+waylanddrv  — turns on the Wine-side ERR/TRACE channel
+         *   for the Wayland driver, so we see the driver's own log lines
+         *   (including "Failed to read events from the compositor") mixed
+         *   in with the raw protocol stream.
+         *
+         * All output from this child (and every Wine process it spawns) goes
+         * to /tmp/wine_wayland_debug.log.  Read it with:
+         *   tail -f /tmp/wine_wayland_debug.log
+         * After reproducing the crash look for the last few lines — the
+         * protocol error line and the wl_display::error event are right
+         * before the connection drops.
+         * ---------------------------------------------------------------- */
+        setenv("WAYLAND_DEBUG", "1", 1);
+        setenv("WINEDEBUG", "+waylanddrv", 1);
+
+        /* Redirect this child's stdout + stderr to the log file.
+         * O_CREAT|O_WRONLY|O_TRUNC — fresh file on every launch. */
+        int log_fd = open("/tmp/wine_wayland_debug.log",
+                          O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (log_fd >= 0) {
+            dup2(log_fd, STDOUT_FILENO);
+            dup2(log_fd, STDERR_FILENO);
+            close(log_fd);
+        }
 
         /* Ensure prefix exists before doing anything else */
         ensure_wine_prefix();

@@ -1,18 +1,11 @@
-/*
- * fg_toplevel.c — XDG toplevel, popup, and focus management.
- *
- * Handles the lifecycle of every xdg_toplevel (one per Win32 window
- * from Wine) and xdg_popup (menus, tooltips, dropdowns).  Also owns
- * focus_toplevel() and toplevel_at() used by input code.
- *
- * Taskbar detection/positioning lives in fg_taskbar.c.
- */
-
 #define _POSIX_C_SOURCE 200809L
 
 #include <assert.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <wayland-server-core.h>
 
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_scene.h>
@@ -25,80 +18,131 @@
 #include "fg_output.h"
 
 /* ------------------------------------------------------------------ */
+/* Internal helpers                                                   */
+/* ------------------------------------------------------------------ */
+
+static bool toplevel_is_mapped(struct fg_toplevel *toplevel) {
+    return
+        toplevel &&
+        toplevel->xdg_toplevel &&
+        toplevel->xdg_toplevel->base &&
+        toplevel->xdg_toplevel->base->surface &&
+        toplevel->xdg_toplevel->base->surface->mapped;
+}
+
+static bool toplevel_is_focusable(struct fg_toplevel *toplevel) {
+    if (!toplevel_is_mapped(toplevel))
+        return false;
+
+    if (!toplevel->scene_tree)
+        return false;
+
+    return true;
+}
+
+static bool seat_surface_is_alive(struct wlr_surface *surface) {
+    return surface != NULL;
+}
+
+/* ------------------------------------------------------------------ */
 /* Focus                                                              */
 /* ------------------------------------------------------------------ */
 
 void focus_toplevel(struct fg_toplevel *toplevel) {
-    if (!toplevel) return;
+    if (!toplevel)
+        return;
+
+    if (!toplevel_is_focusable(toplevel))
+        return;
 
     struct fg_server *server = toplevel->server;
-    struct wlr_seat *seat = server->seat;
 
-    if (!toplevel->xdg_toplevel ||
-        !toplevel->xdg_toplevel->base ||
-        !toplevel->xdg_toplevel->base->surface ||
-        !toplevel->xdg_toplevel->base->surface->mapped)
+    if (!server || !server->seat)
         return;
+
+    struct wlr_seat *seat = server->seat;
 
     struct wlr_surface *surface =
         toplevel->xdg_toplevel->base->surface;
 
-    if (seat->keyboard_state.focused_surface == surface) return;
-
-    wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
+    if (!seat_surface_is_alive(surface))
+        return;
 
     /*
-     * Keep MRU ordering.
-     *
-     * Only manipulate the list if linked. During teardown/unmap the
-     * node may already have been removed.
+     * Already focused.
+     */
+    if (seat->keyboard_state.focused_surface == surface)
+        return;
+
+    /*
+     * Raise visually first.
+     */
+    wlr_scene_node_raise_to_top(
+        &toplevel->scene_tree->node);
+
+    /*
+     * Maintain MRU ordering safely.
      */
     if (!wl_list_empty(&toplevel->link)) {
         wl_list_remove(&toplevel->link);
-        wl_list_insert(&server->toplevels, &toplevel->link);
+        wl_list_insert(&server->toplevels,
+            &toplevel->link);
     }
 
     /*
+     * CRITICAL:
+     *
+     * NEVER explicitly deactivate the previous Wine surface.
+     *
+     * wlroots/wlr_xdg_toplevel_set_activated(false)
+     * during teardown can trigger catastrophic Wine
+     * session termination.
+     *
      * ONLY activate the new surface.
-     * Do NOT explicitly deactivate the old one.
-     *
-     * Wine's Wayland backend is extremely sensitive to
-     * deactivate/configure events during teardown.  Sending
-     * set_activated(false) to a surface that is mid-destruction
-     * triggers Wine's session/shell teardown logic, killing ALL
-     * Wine processes — not just the closing window.
-     *
-     * The Wayland protocol allows implicit deactivation: activating
-     * the new toplevel is sufficient; the old one loses activated
-     * state when it stops receiving keyboard focus.
      */
-    wlr_xdg_toplevel_set_activated(toplevel->xdg_toplevel, true);
+    wlr_xdg_toplevel_set_activated(
+        toplevel->xdg_toplevel,
+        true);
 
-    struct wlr_keyboard *kb = wlr_seat_get_keyboard(seat);
+    struct wlr_keyboard *kb =
+        wlr_seat_get_keyboard(seat);
 
-    if (kb) {
-        wlr_seat_keyboard_notify_enter(
-            seat,
-            surface,
-            kb->keycodes,
-            kb->num_keycodes,
-            &kb->modifiers);
-    }
+    /*
+     * CRITICAL:
+     *
+     * Only send keyboard enter if a keyboard exists.
+     */
+    if (!kb)
+        return;
+
+    /*
+     * CRITICAL:
+     *
+     * We ONLY ever enter stable mapped surfaces.
+     */
+    wlr_seat_keyboard_notify_enter(
+        seat,
+        surface,
+        kb->keycodes,
+        kb->num_keycodes,
+        &kb->modifiers);
 }
 
 /*
- * Transfer focus to the next available toplevel.
+ * Find safest possible next focus target.
  *
- * IMPORTANT:
- * Never transiently clear keyboard focus if another mapped surface
- * exists. Wine interprets empty focus states as session teardown.
+ * NEVER clears focus if ANY mapped surface still exists.
  */
-static void refocus_next(struct fg_server *server,
+static struct fg_toplevel *find_next_focusable(
+    struct fg_server *server,
     struct fg_toplevel *exclude) {
 
     struct fg_toplevel *next;
 
-    /* Pass 1: prefer non-taskbar windows */
+    /*
+     * Pass 1:
+     * Non-taskbar normal windows.
+     */
     wl_list_for_each(next, &server->toplevels, link) {
         if (next == exclude)
             continue;
@@ -106,32 +150,60 @@ static void refocus_next(struct fg_server *server,
         if (next == server->taskbar)
             continue;
 
-        if (!next->xdg_toplevel ||
-            !next->xdg_toplevel->base ||
-            !next->xdg_toplevel->base->surface)
+        if (!toplevel_is_focusable(next))
             continue;
 
-        if (next->xdg_toplevel->base->surface->mapped) {
-            focus_toplevel(next);
-            return;
-        }
+        return next;
     }
 
-    /* Pass 2: fallback to taskbar */
+    /*
+     * Pass 2:
+     * Taskbar fallback.
+     */
     if (server->taskbar &&
         server->taskbar != exclude &&
-        server->taskbar->xdg_toplevel &&
-        server->taskbar->xdg_toplevel->base &&
-        server->taskbar->xdg_toplevel->base->surface &&
-        server->taskbar->xdg_toplevel->base->surface->mapped) {
+        toplevel_is_focusable(server->taskbar)) {
 
-        focus_toplevel(server->taskbar);
+        return server->taskbar;
+    }
+
+    return NULL;
+}
+
+/*
+ * CRITICAL:
+ *
+ * Refocus must ONLY happen after the destroyed surface
+ * is completely gone.
+ *
+ * NEVER call from unmap().
+ */
+static void refocus_next(
+    struct fg_server *server,
+    struct fg_toplevel *exclude) {
+
+    struct fg_toplevel *next =
+        find_next_focusable(server, exclude);
+
+    if (next) {
+        focus_toplevel(next);
         return;
     }
 
     /*
-     * ONLY clear focus if literally nothing remains.
+     * ABSOLUTE LAST RESORT:
+     *
+     * Only clear focus if literally no mapped
+     * surfaces remain anywhere.
      */
+    struct fg_toplevel *iter;
+
+    wl_list_for_each(iter, &server->toplevels, link) {
+        if (toplevel_is_focusable(iter)) {
+            return;
+        }
+    }
+
     wlr_seat_keyboard_clear_focus(server->seat);
 }
 
@@ -139,23 +211,37 @@ static void refocus_next(struct fg_server *server,
 /* Hit-testing                                                        */
 /* ------------------------------------------------------------------ */
 
-struct fg_toplevel *toplevel_at(struct fg_server *server,
-    double lx, double ly, struct wlr_surface **surface,
-    double *sx, double *sy) {
+struct fg_toplevel *toplevel_at(
+    struct fg_server *server,
+    double lx,
+    double ly,
+    struct wlr_surface **surface,
+    double *sx,
+    double *sy) {
 
     struct wlr_scene_node *node =
         wlr_scene_node_at(
             &server->scene->tree.node,
-            lx, ly, sx, sy);
+            lx,
+            ly,
+            sx,
+            sy);
 
-    if (!node || node->type != WLR_SCENE_NODE_BUFFER)
+    if (!node)
+        return NULL;
+
+    if (node->type != WLR_SCENE_NODE_BUFFER)
         return NULL;
 
     struct wlr_scene_buffer *scene_buffer =
         wlr_scene_buffer_from_node(node);
 
+    if (!scene_buffer)
+        return NULL;
+
     struct wlr_scene_surface *scene_surface =
-        wlr_scene_surface_try_from_buffer(scene_buffer);
+        wlr_scene_surface_try_from_buffer(
+            scene_buffer);
 
     if (!scene_surface)
         return NULL;
@@ -167,15 +253,23 @@ struct fg_toplevel *toplevel_at(struct fg_server *server,
     while (tree && !tree->node.data)
         tree = tree->node.parent;
 
-    return tree ? tree->node.data : NULL;
+    if (!tree)
+        return NULL;
+
+    return tree->node.data;
 }
 
 /* ------------------------------------------------------------------ */
 /* Interactive move / resize                                          */
 /* ------------------------------------------------------------------ */
 
-static void begin_interactive(struct fg_toplevel *toplevel,
-    enum fg_cursor_mode mode, uint32_t edges) {
+static void begin_interactive(
+    struct fg_toplevel *toplevel,
+    enum fg_cursor_mode mode,
+    uint32_t edges) {
+
+    if (!toplevel_is_focusable(toplevel))
+        return;
 
     struct fg_server *server = toplevel->server;
 
@@ -190,33 +284,36 @@ static void begin_interactive(struct fg_toplevel *toplevel,
         server->grab_y =
             server->cursor->y -
             toplevel->scene_tree->node.y;
-    } else {
-        struct wlr_box geo;
 
-        fg_xdg_surface_get_geometry(
-            toplevel->xdg_toplevel->base,
-            &geo);
-
-        double bx =
-            (toplevel->scene_tree->node.x + geo.x) +
-            ((edges & WLR_EDGE_RIGHT) ? geo.width : 0);
-
-        double by =
-            (toplevel->scene_tree->node.y + geo.y) +
-            ((edges & WLR_EDGE_BOTTOM) ? geo.height : 0);
-
-        server->grab_x = server->cursor->x - bx;
-        server->grab_y = server->cursor->y - by;
-
-        server->grab_geobox = geo;
-        server->grab_geobox.x +=
-            toplevel->scene_tree->node.x;
-
-        server->grab_geobox.y +=
-            toplevel->scene_tree->node.y;
-
-        server->resize_edges = edges;
+        return;
     }
+
+    struct wlr_box geo;
+
+    fg_xdg_surface_get_geometry(
+        toplevel->xdg_toplevel->base,
+        &geo);
+
+    double bx =
+        (toplevel->scene_tree->node.x + geo.x) +
+        ((edges & WLR_EDGE_RIGHT) ? geo.width : 0);
+
+    double by =
+        (toplevel->scene_tree->node.y + geo.y) +
+        ((edges & WLR_EDGE_BOTTOM) ? geo.height : 0);
+
+    server->grab_x = server->cursor->x - bx;
+    server->grab_y = server->cursor->y - by;
+
+    server->grab_geobox = geo;
+
+    server->grab_geobox.x +=
+        toplevel->scene_tree->node.x;
+
+    server->grab_geobox.y +=
+        toplevel->scene_tree->node.y;
+
+    server->resize_edges = edges;
 }
 
 /* ------------------------------------------------------------------ */
@@ -224,17 +321,26 @@ static void begin_interactive(struct fg_toplevel *toplevel,
 /* ------------------------------------------------------------------ */
 
 static bool try_center(struct fg_toplevel *toplevel) {
+    if (!toplevel_is_focusable(toplevel))
+        return false;
+
     if (toplevel->centered)
         return false;
 
     struct fg_server *server = toplevel->server;
 
-    int screen_w, screen_h;
+    int screen_w;
+    int screen_h;
 
-    if (!server_get_screen_size(server, &screen_w, &screen_h))
+    if (!server_get_screen_size(
+            server,
+            &screen_w,
+            &screen_h)) {
         return false;
+    }
 
     int bar_h = get_taskbar_height(server);
+
     int work_h = screen_h - bar_h;
 
     if (work_h <= 0)
@@ -262,28 +368,39 @@ static bool try_center(struct fg_toplevel *toplevel) {
 
         wlr_scene_node_set_position(
             &toplevel->scene_tree->node,
-            nx, ny);
-
-        toplevel->centered = true;
+            nx,
+            ny);
 
         wlr_log(WLR_INFO,
             "Centered window: (%d,%d) %dx%d",
-            nx, ny, geo.width, geo.height);
-
-        return true;
+            nx,
+            ny,
+            geo.width,
+            geo.height);
     }
 
     toplevel->centered = true;
-    return false;
+
+    return true;
 }
 
-static void clamp_above_taskbar(struct fg_toplevel *toplevel) {
+static void clamp_above_taskbar(
+    struct fg_toplevel *toplevel) {
+
+    if (!toplevel_is_focusable(toplevel))
+        return;
+
     struct fg_server *server = toplevel->server;
 
-    int screen_w, screen_h;
+    int screen_w;
+    int screen_h;
 
-    if (!server_get_screen_size(server, &screen_w, &screen_h))
+    if (!server_get_screen_size(
+            server,
+            &screen_w,
+            &screen_h)) {
         return;
+    }
 
     int bar_h = get_taskbar_height(server);
 
@@ -303,32 +420,46 @@ static void clamp_above_taskbar(struct fg_toplevel *toplevel) {
 
     int ny = toplevel->scene_tree->node.y;
 
-    if (ny + geo.height > work_h) {
-        int new_y = work_h - geo.height;
+    if (ny + geo.height <= work_h)
+        return;
 
-        if (new_y < 0)
-            new_y = 0;
+    int new_y = work_h - geo.height;
 
-        wlr_scene_node_set_position(
-            &toplevel->scene_tree->node,
-            toplevel->scene_tree->node.x,
-            new_y);
-    }
+    if (new_y < 0)
+        new_y = 0;
+
+    wlr_scene_node_set_position(
+        &toplevel->scene_tree->node,
+        toplevel->scene_tree->node.x,
+        new_y);
 }
 
 /* ------------------------------------------------------------------ */
 /* Toplevel lifecycle                                                 */
 /* ------------------------------------------------------------------ */
 
-static void xdg_toplevel_map(struct wl_listener *listener,
+static void xdg_toplevel_map(
+    struct wl_listener *listener,
     void *data) {
 
+    (void)data;
+
     struct fg_toplevel *toplevel =
-        wl_container_of(listener, toplevel, map);
+        wl_container_of(listener,
+            toplevel,
+            map);
 
-    struct fg_server *server = toplevel->server;
+    struct fg_server *server =
+        toplevel->server;
 
-    wl_list_insert(&server->toplevels, &toplevel->link);
+    /*
+     * Safe insert.
+     */
+    if (wl_list_empty(&toplevel->link)) {
+        wl_list_insert(
+            &server->toplevels,
+            &toplevel->link);
+    }
 
     wlr_log(WLR_INFO,
         "Toplevel mapped: app_id=%s title=\"%s\"",
@@ -336,6 +467,7 @@ static void xdg_toplevel_map(struct wl_listener *listener,
         toplevel->xdg_toplevel->title ?: "");
 
     if (is_taskbar(toplevel)) {
+
         position_taskbar(toplevel);
 
         wlr_scene_node_raise_to_top(
@@ -349,29 +481,46 @@ static void xdg_toplevel_map(struct wl_listener *listener,
 
     try_center(toplevel);
     clamp_above_taskbar(toplevel);
+
+    /*
+     * Safe to focus here.
+     */
     focus_toplevel(toplevel);
 }
 
-static void xdg_toplevel_unmap(struct wl_listener *listener,
+static void xdg_toplevel_unmap(
+    struct wl_listener *listener,
     void *data) {
 
-    struct fg_toplevel *toplevel =
-        wl_container_of(listener, toplevel, unmap);
+    (void)data;
 
-    struct fg_server *server = toplevel->server;
+    struct fg_toplevel *toplevel =
+        wl_container_of(listener,
+            toplevel,
+            unmap);
+
+    struct fg_server *server =
+        toplevel->server;
 
     wlr_log(WLR_INFO,
         "Toplevel unmapped: app_id=%s title=\"%s\"",
         toplevel->xdg_toplevel->app_id ?: "(null)",
         toplevel->xdg_toplevel->title ?: "");
 
+    /*
+     * Cancel interactive operations.
+     */
     if (toplevel == server->grabbed_toplevel) {
-        server->cursor_mode = FG_CURSOR_PASSTHROUGH;
+        server->cursor_mode =
+            FG_CURSOR_PASSTHROUGH;
+
         server->grabbed_toplevel = NULL;
     }
 
     /*
-     * Remove from MRU/toplevel list exactly once.
+     * CRITICAL:
+     *
+     * Remove from MRU exactly once.
      */
     if (!wl_list_empty(&toplevel->link)) {
         wl_list_remove(&toplevel->link);
@@ -379,38 +528,38 @@ static void xdg_toplevel_unmap(struct wl_listener *listener,
     }
 
     /*
-     * Do NOT refocus here.
+     * ABSOLUTELY NEVER REFOCUS HERE.
      *
-     * wlr_seat_keyboard_notify_enter() sends wl_keyboard::leave
-     * to the currently focused surface before entering the new one.
-     * During unmap, the dying surface is still the focused surface,
-     * so the leave event hits a HWND that Wine is mid-destroying.
-     * Wine's Wayland driver interprets that as session teardown
-     * and kills all Wine processes.
-     *
-     * Refocusing is deferred to xdg_toplevel_destroy(), where the
-     * old surface is fully dead and wlroots won't try to deliver
-     * protocol events to it.
+     * Refocus from unmap() is the exact bug
+     * that kills all Wine windows.
      */
 }
 
-static void xdg_toplevel_commit(struct wl_listener *listener,
+static void xdg_toplevel_commit(
+    struct wl_listener *listener,
     void *data) {
 
-    struct fg_toplevel *toplevel =
-        wl_container_of(listener, toplevel, commit);
+    (void)data;
 
-    struct fg_server *server = toplevel->server;
+    struct fg_toplevel *toplevel =
+        wl_container_of(listener,
+            toplevel,
+            commit);
+
+    struct fg_server *server =
+        toplevel->server;
 
     if (toplevel->xdg_toplevel->base->initial_commit) {
+
         wlr_xdg_toplevel_set_size(
             toplevel->xdg_toplevel,
-            0, 0);
+            0,
+            0);
 
         return;
     }
 
-    if (!toplevel->xdg_toplevel->base->surface->mapped)
+    if (!toplevel_is_mapped(toplevel))
         return;
 
     if (server->taskbar == toplevel) {
@@ -430,23 +579,37 @@ static void xdg_toplevel_commit(struct wl_listener *listener,
     clamp_above_taskbar(toplevel);
 }
 
-static void xdg_toplevel_destroy(struct wl_listener *listener,
+static void xdg_toplevel_destroy(
+    struct wl_listener *listener,
     void *data) {
 
-    struct fg_toplevel *toplevel =
-        wl_container_of(listener, toplevel, destroy);
+    (void)data;
 
-    struct fg_server *server = toplevel->server;
+    struct fg_toplevel *toplevel =
+        wl_container_of(listener,
+            toplevel,
+            destroy);
+
+    struct fg_server *server =
+        toplevel->server;
 
     wlr_log(WLR_INFO,
         "Toplevel destroyed: app_id=%s",
         toplevel->xdg_toplevel->app_id ?: "(null)");
 
+    /*
+     * Cancel grabs safely.
+     */
     if (toplevel == server->grabbed_toplevel) {
-        server->cursor_mode = FG_CURSOR_PASSTHROUGH;
+        server->cursor_mode =
+            FG_CURSOR_PASSTHROUGH;
+
         server->grabbed_toplevel = NULL;
     }
 
+    /*
+     * Taskbar cleanup.
+     */
     if (server->taskbar == toplevel) {
         server->taskbar = NULL;
 
@@ -455,20 +618,22 @@ static void xdg_toplevel_destroy(struct wl_listener *listener,
     }
 
     /*
-     * DO NOT wl_list_remove(&toplevel->link) here.
+     * CRITICAL:
      *
-     * The node was already removed during unmap.
-     * Double-removal corrupts wl_list and can kill
-     * the entire Wine session.
+     * NEVER wl_list_remove(&toplevel->link)
+     * here.
+     *
+     * unmap() already removed it.
+     *
+     * Double remove corrupts wl_list.
      */
 
     /*
-     * Refocus now — the unmap handler defers this to here so that
-     * no keyboard leave/enter events hit a surface mid-teardown.
+     * CRITICAL:
      *
-     * By destroy time the old surface's Wayland resources are being
-     * torn down, so wlr_seat_keyboard_notify_enter() won't deliver
-     * a leave event to it.  Safe to refocus.
+     * ONLY NOW is it safe to refocus.
+     *
+     * The dying surface is gone.
      */
     refocus_next(server, toplevel);
 
@@ -493,8 +658,12 @@ static void xdg_toplevel_request_move(
     struct wl_listener *listener,
     void *data) {
 
+    (void)data;
+
     struct fg_toplevel *toplevel =
-        wl_container_of(listener, toplevel, request_move);
+        wl_container_of(listener,
+            toplevel,
+            request_move);
 
     begin_interactive(
         toplevel,
@@ -506,10 +675,13 @@ static void xdg_toplevel_request_resize(
     struct wl_listener *listener,
     void *data) {
 
-    struct wlr_xdg_toplevel_resize_event *event = data;
+    struct wlr_xdg_toplevel_resize_event *event =
+        data;
 
     struct fg_toplevel *toplevel =
-        wl_container_of(listener, toplevel, request_resize);
+        wl_container_of(listener,
+            toplevel,
+            request_resize);
 
     begin_interactive(
         toplevel,
@@ -521,21 +693,31 @@ static void xdg_toplevel_request_maximize(
     struct wl_listener *listener,
     void *data) {
 
+    (void)data;
+
     struct fg_toplevel *toplevel =
-        wl_container_of(listener, toplevel, request_maximize);
+        wl_container_of(listener,
+            toplevel,
+            request_maximize);
 
-    struct fg_server *server = toplevel->server;
+    struct fg_server *server =
+        toplevel->server;
 
-    if (!toplevel->xdg_toplevel->base->surface->mapped)
+    if (!toplevel_is_mapped(toplevel))
         return;
 
     if (toplevel->xdg_toplevel->requested.maximized) {
-        int screen_w, screen_h;
 
-        if (server_get_screen_size(server,
-                &screen_w, &screen_h)) {
+        int screen_w;
+        int screen_h;
 
-            int bar_h = get_taskbar_height(server);
+        if (server_get_screen_size(
+                server,
+                &screen_w,
+                &screen_h)) {
+
+            int bar_h =
+                get_taskbar_height(server);
 
             wlr_xdg_toplevel_set_size(
                 toplevel->xdg_toplevel,
@@ -544,37 +726,48 @@ static void xdg_toplevel_request_maximize(
 
             wlr_scene_node_set_position(
                 &toplevel->scene_tree->node,
-                0, 0);
+                0,
+                0);
         }
 
         wlr_xdg_toplevel_set_maximized(
             toplevel->xdg_toplevel,
             true);
-    } else {
-        wlr_xdg_toplevel_set_maximized(
-            toplevel->xdg_toplevel,
-            false);
+
+        return;
     }
+
+    wlr_xdg_toplevel_set_maximized(
+        toplevel->xdg_toplevel,
+        false);
 }
 
 static void xdg_toplevel_request_fullscreen(
     struct wl_listener *listener,
     void *data) {
 
+    (void)data;
+
     struct fg_toplevel *toplevel =
-        wl_container_of(listener, toplevel,
+        wl_container_of(listener,
+            toplevel,
             request_fullscreen);
 
-    struct fg_server *server = toplevel->server;
+    struct fg_server *server =
+        toplevel->server;
 
-    if (!toplevel->xdg_toplevel->base->surface->mapped)
+    if (!toplevel_is_mapped(toplevel))
         return;
 
     if (toplevel->xdg_toplevel->requested.fullscreen) {
-        int screen_w, screen_h;
 
-        if (server_get_screen_size(server,
-                &screen_w, &screen_h)) {
+        int screen_w;
+        int screen_h;
+
+        if (server_get_screen_size(
+                server,
+                &screen_w,
+                &screen_h)) {
 
             wlr_xdg_toplevel_set_size(
                 toplevel->xdg_toplevel,
@@ -583,7 +776,8 @@ static void xdg_toplevel_request_fullscreen(
 
             wlr_scene_node_set_position(
                 &toplevel->scene_tree->node,
-                0, 0);
+                0,
+                0);
 
             wlr_scene_node_raise_to_top(
                 &toplevel->scene_tree->node);
@@ -593,17 +787,18 @@ static void xdg_toplevel_request_fullscreen(
             toplevel->xdg_toplevel,
             true);
 
-    } else {
-        wlr_xdg_toplevel_set_fullscreen(
-            toplevel->xdg_toplevel,
-            false);
+        return;
+    }
 
-        if (server->taskbar &&
-            server->taskbar->xdg_toplevel->base->surface->mapped) {
+    wlr_xdg_toplevel_set_fullscreen(
+        toplevel->xdg_toplevel,
+        false);
 
-            wlr_scene_node_raise_to_top(
-                &server->taskbar->scene_tree->node);
-        }
+    if (server->taskbar &&
+        toplevel_is_mapped(server->taskbar)) {
+
+        wlr_scene_node_raise_to_top(
+            &server->taskbar->scene_tree->node);
     }
 }
 
@@ -611,17 +806,23 @@ static void xdg_toplevel_request_fullscreen(
 /* New toplevel                                                       */
 /* ------------------------------------------------------------------ */
 
-void server_new_xdg_toplevel(struct wl_listener *listener,
+void server_new_xdg_toplevel(
+    struct wl_listener *listener,
     void *data) {
 
     struct fg_server *server =
-        wl_container_of(listener, server,
+        wl_container_of(listener,
+            server,
             new_xdg_toplevel);
 
-    struct wlr_xdg_toplevel *xdg_toplevel = data;
+    struct wlr_xdg_toplevel *xdg_toplevel =
+        data;
 
     struct fg_toplevel *toplevel =
         calloc(1, sizeof(*toplevel));
+
+    if (!toplevel)
+        return;
 
     toplevel->server = server;
     toplevel->xdg_toplevel = xdg_toplevel;
@@ -633,25 +834,41 @@ void server_new_xdg_toplevel(struct wl_listener *listener,
             &server->scene->tree,
             xdg_toplevel->base);
 
-    toplevel->scene_tree->node.data = toplevel;
-    xdg_toplevel->base->data = toplevel->scene_tree;
+    if (!toplevel->scene_tree) {
+        free(toplevel);
+        return;
+    }
 
-    toplevel->map.notify = xdg_toplevel_map;
+    toplevel->scene_tree->node.data =
+        toplevel;
+
+    xdg_toplevel->base->data =
+        toplevel->scene_tree;
+
+    toplevel->map.notify =
+        xdg_toplevel_map;
+
     wl_signal_add(
         &xdg_toplevel->base->surface->events.map,
         &toplevel->map);
 
-    toplevel->unmap.notify = xdg_toplevel_unmap;
+    toplevel->unmap.notify =
+        xdg_toplevel_unmap;
+
     wl_signal_add(
         &xdg_toplevel->base->surface->events.unmap,
         &toplevel->unmap);
 
-    toplevel->commit.notify = xdg_toplevel_commit;
+    toplevel->commit.notify =
+        xdg_toplevel_commit;
+
     wl_signal_add(
         &xdg_toplevel->base->surface->events.commit,
         &toplevel->commit);
 
-    toplevel->destroy.notify = xdg_toplevel_destroy;
+    toplevel->destroy.notify =
+        xdg_toplevel_destroy;
+
     wl_signal_add(
         &xdg_toplevel->events.destroy,
         &toplevel->destroy);
@@ -689,23 +906,37 @@ void server_new_xdg_toplevel(struct wl_listener *listener,
 /* Popups                                                             */
 /* ------------------------------------------------------------------ */
 
-static void xdg_popup_commit(struct wl_listener *listener,
+static void xdg_popup_commit(
+    struct wl_listener *listener,
     void *data) {
 
-    struct fg_popup *popup =
-        wl_container_of(listener, popup, commit);
+    (void)data;
 
+    struct fg_popup *popup =
+        wl_container_of(listener,
+            popup,
+            commit);
+
+    /*
+     * Initial configure required by protocol.
+     */
     if (popup->xdg_popup->base->initial_commit) {
+
         wlr_xdg_surface_schedule_configure(
             popup->xdg_popup->base);
     }
 }
 
-static void xdg_popup_destroy(struct wl_listener *listener,
+static void xdg_popup_destroy(
+    struct wl_listener *listener,
     void *data) {
 
+    (void)data;
+
     struct fg_popup *popup =
-        wl_container_of(listener, popup, destroy);
+        wl_container_of(listener,
+            popup,
+            destroy);
 
     wl_list_remove(&popup->commit.link);
     wl_list_remove(&popup->destroy.link);
@@ -713,13 +944,20 @@ static void xdg_popup_destroy(struct wl_listener *listener,
     free(popup);
 }
 
-void server_new_xdg_popup(struct wl_listener *listener,
+void server_new_xdg_popup(
+    struct wl_listener *listener,
     void *data) {
 
-    struct wlr_xdg_popup *xdg_popup = data;
+    (void)listener;
+
+    struct wlr_xdg_popup *xdg_popup =
+        data;
 
     struct fg_popup *popup =
         calloc(1, sizeof(*popup));
+
+    if (!popup)
+        return;
 
     popup->xdg_popup = xdg_popup;
 
@@ -727,22 +965,50 @@ void server_new_xdg_popup(struct wl_listener *listener,
         wlr_xdg_surface_try_from_wlr_surface(
             xdg_popup->parent);
 
-    assert(parent);
+    /*
+     * CRITICAL:
+     *
+     * Never assert-crash compositor because of a
+     * transient/destroyed Wine popup parent.
+     */
+    if (!parent) {
+        free(popup);
+        return;
+    }
 
-    struct wlr_scene_tree *parent_tree = parent->data;
+    struct wlr_scene_tree *parent_tree =
+        parent->data;
+
+    /*
+     * Parent may already be tearing down.
+     */
+    if (!parent_tree) {
+        free(popup);
+        return;
+    }
 
     xdg_popup->base->data =
         wlr_scene_xdg_surface_create(
             parent_tree,
             xdg_popup->base);
 
-    popup->commit.notify = xdg_popup_commit;
+    /*
+     * Scene creation may fail during teardown races.
+     */
+    if (!xdg_popup->base->data) {
+        free(popup);
+        return;
+    }
+
+    popup->commit.notify =
+        xdg_popup_commit;
 
     wl_signal_add(
         &xdg_popup->base->surface->events.commit,
         &popup->commit);
 
-    popup->destroy.notify = xdg_popup_destroy;
+    popup->destroy.notify =
+        xdg_popup_destroy;
 
     wl_signal_add(
         &xdg_popup->events.destroy,

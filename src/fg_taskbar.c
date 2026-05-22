@@ -40,14 +40,6 @@ bool is_taskbar(struct fg_toplevel *toplevel) {
         return false;
 
     /*
-     * Reject transient/child windows.  The real taskbar is never a
-     * child of another toplevel.  Explorer-hosted control panels,
-     * dialogs, and shell frames often have a parent set.
-     */
-    if (toplevel->xdg_toplevel->parent)
-        return false;
-
-    /*
      * Geometry heuristic: the taskbar spans (nearly) the full screen
      * width and is short.  Other explorer.exe windows (Run dialog,
      * file browser, Control Panel) are much narrower or much taller.

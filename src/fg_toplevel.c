@@ -133,87 +133,22 @@ void focus_toplevel(struct fg_toplevel *toplevel) {
  *
  * NEVER clears focus if ANY mapped surface still exists.
  */
-static struct fg_toplevel *find_next_focusable(
-    struct fg_server *server,
-    struct fg_toplevel *exclude) {
-
-    struct fg_toplevel *next;
-
-    /*
-     * Only consider non-taskbar normal windows.
-     *
-     * The taskbar should NEVER receive keyboard focus as a
-     * fallback.  Wine's Shell_TrayWnd does not expect
-     * unsolicited keyboard activation — sending it causes
-     * Wine to freeze/deadlock when all other windows have
-     * just been destroyed.  The user can still click the
-     * taskbar to focus it explicitly (via cursor_button).
-     */
-    wl_list_for_each(next, &server->toplevels, link) {
-        if (next == exclude)
-            continue;
-
-        if (next == server->taskbar)
-            continue;
-
-        if (!toplevel_is_focusable(next))
-            continue;
-
-        return next;
-    }
-
-    return NULL;
-}
-
 /*
  * CRITICAL:
  *
- * Refocus is DEFERRED to an idle callback.
+ * Wine destroys surfaces in unpredictable multi-batch bursts
+ * from multiple threads.  ANY automatic refocusing after a
+ * destroy risks activating a surface that Wine is about to
+ * tear down in the next batch, which freezes the Wine session.
  *
- * Wine often destroys multiple surfaces in a single burst
- * (e.g. closing a control panel tears down 4+ windows at once).
- * If we refocus after each individual destroy, we send
- * xdg_toplevel.configure(activated) + wl_keyboard.enter to
- * surfaces that Wine is in the middle of tearing down.  This
- * confuses Wine and causes it to freeze/deadlock.
- *
- * By deferring to idle, all pending destroys are processed
- * first, and we refocus once to whatever is actually still alive.
+ * The only safe approach: clear keyboard focus on destroy.
+ * The user clicks to focus the next window (or the taskbar).
+ * This matches how a real Windows desktop behaves when the
+ * last foreground window closes — focus goes to the desktop
+ * (no window), and the user clicks to activate something.
  */
-static void deferred_refocus_callback(void *data) {
-    struct fg_server *server = data;
-
-    server->refocus_pending = false;
-
-    struct fg_toplevel *next =
-        find_next_focusable(server, NULL);
-
-    if (next) {
-        wlr_log(WLR_INFO,
-            "Deferred refocus: focusing app_id=%s title=\"%s\"",
-            next->xdg_toplevel->app_id ?: "(null)",
-            next->xdg_toplevel->title ?: "");
-        focus_toplevel(next);
-        return;
-    }
-
-    wlr_log(WLR_INFO,
-        "Deferred refocus: no focusable target, clearing focus");
-
+static void clear_focus_on_destroy(struct fg_server *server) {
     wlr_seat_keyboard_clear_focus(server->seat);
-}
-
-static void schedule_refocus(struct fg_server *server) {
-    if (server->refocus_pending)
-        return;
-
-    server->refocus_pending = true;
-
-    struct wl_event_loop *loop =
-        wl_display_get_event_loop(server->display);
-
-    wl_event_loop_add_idle(loop,
-        deferred_refocus_callback, server);
 }
 
 /* ------------------------------------------------------------------ */
@@ -669,14 +604,10 @@ static void xdg_toplevel_destroy(
      */
 
     /*
-     * Schedule a deferred refocus.  This runs on the next
-     * event loop idle, after all pending destroys from this
-     * burst have been processed.  We never refocus
-     * immediately because Wine may be destroying multiple
-     * surfaces at once — activating a dying surface freezes
-     * the Wine session.
+     * Just clear focus — never activate another surface
+     * from a destroy handler.  The user clicks to refocus.
      */
-    schedule_refocus(server);
+    clear_focus_on_destroy(server);
 
     wl_list_remove(&toplevel->map.link);
     wl_list_remove(&toplevel->unmap.link);

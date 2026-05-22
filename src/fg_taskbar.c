@@ -40,6 +40,14 @@ bool is_taskbar(struct fg_toplevel *toplevel) {
         return false;
 
     /*
+     * Reject transient/child windows.  The real taskbar is never a
+     * child of another toplevel.  Explorer-hosted control panels,
+     * dialogs, and shell frames often have a parent set.
+     */
+    if (toplevel->xdg_toplevel->parent)
+        return false;
+
+    /*
      * Geometry heuristic: the taskbar spans (nearly) the full screen
      * width and is short.  Other explorer.exe windows (Run dialog,
      * file browser, Control Panel) are much narrower or much taller.
@@ -109,7 +117,23 @@ int get_taskbar_height(struct fg_server *server) {
 void try_detect_taskbar(struct fg_toplevel *toplevel) {
     struct fg_server *server = toplevel->server;
 
-    /* Already have a taskbar, or this IS the taskbar */
+    /*
+     * Validate existing taskbar — if it's gone stale (unmapped,
+     * destroyed, or otherwise invalid), clear it so we can recover.
+     */
+    if (server->taskbar) {
+        struct fg_toplevel *tb = server->taskbar;
+        if (!tb->xdg_toplevel ||
+            !tb->xdg_toplevel->base ||
+            !tb->xdg_toplevel->base->surface ||
+            !tb->xdg_toplevel->base->surface->mapped) {
+            wlr_log(WLR_INFO,
+                "Stale taskbar pointer detected, clearing for re-scan");
+            server->taskbar = NULL;
+        }
+    }
+
+    /* Current taskbar is still valid and mapped — nothing to do */
     if (server->taskbar) return;
 
     if (!toplevel->xdg_toplevel->base->surface->mapped) return;
@@ -124,4 +148,33 @@ void try_detect_taskbar(struct fg_toplevel *toplevel) {
         position_taskbar(toplevel);
         wlr_scene_node_raise_to_top(&toplevel->scene_tree->node);
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* Full re-scan — called after taskbar loss (destroy/unmap)           */
+/* ------------------------------------------------------------------ */
+
+void taskbar_rescan_all(struct fg_server *server) {
+    if (server->taskbar) return;   /* already recovered */
+
+    struct fg_toplevel *tl;
+    wl_list_for_each(tl, &server->toplevels, link) {
+        if (!tl->xdg_toplevel ||
+            !tl->xdg_toplevel->base ||
+            !tl->xdg_toplevel->base->surface ||
+            !tl->xdg_toplevel->base->surface->mapped)
+            continue;
+
+        if (is_taskbar(tl)) {
+            wlr_log(WLR_INFO,
+                "Taskbar re-acquired via rescan: app_id=%s",
+                tl->xdg_toplevel->app_id ?: "(null)");
+            position_taskbar(tl);
+            wlr_scene_node_raise_to_top(&tl->scene_tree->node);
+            return;
+        }
+    }
+
+    wlr_log(WLR_INFO,
+        "Taskbar rescan found no candidate — will retry on next map/commit");
 }

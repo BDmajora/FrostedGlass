@@ -34,4 +34,10 @@ int get_taskbar_height(struct fg_server *server);
  */
 void try_detect_taskbar(struct fg_toplevel *toplevel);
 
+/*
+ * Scan all mapped toplevels looking for a taskbar.
+ * Called after taskbar loss (destroy) to recover immediately.
+ */
+void taskbar_rescan_all(struct fg_server *server);
+
 #endif /* FG_TASKBAR_H */

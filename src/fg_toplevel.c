@@ -479,6 +479,14 @@ static void xdg_toplevel_map(
         return;
     }
 
+    /*
+     * If we have no taskbar, any new map is a chance to find one
+     * (Wine may have respawned explorer).
+     */
+    if (!server->taskbar) {
+        taskbar_rescan_all(server);
+    }
+
     try_center(toplevel);
     clamp_above_taskbar(toplevel);
 
@@ -608,13 +616,18 @@ static void xdg_toplevel_destroy(
     }
 
     /*
-     * Taskbar cleanup.
+     * Taskbar cleanup — clear and immediately try to
+     * re-acquire from remaining mapped toplevels.
+     * Wine may have already remapped a replacement
+     * explorer surface before the old one is destroyed.
      */
     if (server->taskbar == toplevel) {
         server->taskbar = NULL;
 
         wlr_log(WLR_INFO,
-            "Taskbar destroyed");
+            "Taskbar destroyed — scanning for replacement");
+
+        taskbar_rescan_all(server);
     }
 
     /*

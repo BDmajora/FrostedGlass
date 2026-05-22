@@ -95,6 +95,13 @@ struct fg_server {
 
     pid_t wine_pid;
     const char *wine_desktop_res;           /* e.g. "1920x1080" or NULL=auto */
+
+    /* Deferred refocus — when multiple surfaces are destroyed in a
+     * burst (common with Wine control panels), we defer refocus to
+     * an idle callback so all destroys are processed first.  This
+     * avoids sending activation events to surfaces Wine is tearing
+     * down, which can freeze/deadlock Wine. */
+    bool refocus_pending;
 };
 
 /* ------------------------------------------------------------------ */

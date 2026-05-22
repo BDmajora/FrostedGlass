@@ -140,8 +140,14 @@ static struct fg_toplevel *find_next_focusable(
     struct fg_toplevel *next;
 
     /*
-     * Pass 1:
-     * Non-taskbar normal windows.
+     * Only consider non-taskbar normal windows.
+     *
+     * The taskbar should NEVER receive keyboard focus as a
+     * fallback.  Wine's Shell_TrayWnd does not expect
+     * unsolicited keyboard activation — sending it causes
+     * Wine to freeze/deadlock when all other windows have
+     * just been destroyed.  The user can still click the
+     * taskbar to focus it explicitly (via cursor_button).
      */
     wl_list_for_each(next, &server->toplevels, link) {
         if (next == exclude)
@@ -156,55 +162,58 @@ static struct fg_toplevel *find_next_focusable(
         return next;
     }
 
-    /*
-     * Pass 2:
-     * Taskbar fallback.
-     */
-    if (server->taskbar &&
-        server->taskbar != exclude &&
-        toplevel_is_focusable(server->taskbar)) {
-
-        return server->taskbar;
-    }
-
     return NULL;
 }
 
 /*
  * CRITICAL:
  *
- * Refocus must ONLY happen after the destroyed surface
- * is completely gone.
+ * Refocus is DEFERRED to an idle callback.
  *
- * NEVER call from unmap().
+ * Wine often destroys multiple surfaces in a single burst
+ * (e.g. closing a control panel tears down 4+ windows at once).
+ * If we refocus after each individual destroy, we send
+ * xdg_toplevel.configure(activated) + wl_keyboard.enter to
+ * surfaces that Wine is in the middle of tearing down.  This
+ * confuses Wine and causes it to freeze/deadlock.
+ *
+ * By deferring to idle, all pending destroys are processed
+ * first, and we refocus once to whatever is actually still alive.
  */
-static void refocus_next(
-    struct fg_server *server,
-    struct fg_toplevel *exclude) {
+static void deferred_refocus_callback(void *data) {
+    struct fg_server *server = data;
+
+    server->refocus_pending = false;
 
     struct fg_toplevel *next =
-        find_next_focusable(server, exclude);
+        find_next_focusable(server, NULL);
 
     if (next) {
+        wlr_log(WLR_INFO,
+            "Deferred refocus: focusing app_id=%s title=\"%s\"",
+            next->xdg_toplevel->app_id ?: "(null)",
+            next->xdg_toplevel->title ?: "");
         focus_toplevel(next);
         return;
     }
 
-    /*
-     * ABSOLUTE LAST RESORT:
-     *
-     * Only clear focus if literally no mapped
-     * surfaces remain anywhere.
-     */
-    struct fg_toplevel *iter;
-
-    wl_list_for_each(iter, &server->toplevels, link) {
-        if (toplevel_is_focusable(iter)) {
-            return;
-        }
-    }
+    wlr_log(WLR_INFO,
+        "Deferred refocus: no focusable target, clearing focus");
 
     wlr_seat_keyboard_clear_focus(server->seat);
+}
+
+static void schedule_refocus(struct fg_server *server) {
+    if (server->refocus_pending)
+        return;
+
+    server->refocus_pending = true;
+
+    struct wl_event_loop *loop =
+        wl_display_get_event_loop(server->display);
+
+    wl_event_loop_add_idle(loop,
+        deferred_refocus_callback, server);
 }
 
 /* ------------------------------------------------------------------ */
@@ -516,6 +525,22 @@ static void xdg_toplevel_unmap(
         toplevel->xdg_toplevel->title ?: "");
 
     /*
+     * Taskbar unmap — the surface is gone but the toplevel
+     * still exists.  Clear the pointer NOW so that commit
+     * handlers on other surfaces can re-detect immediately,
+     * rather than pointing at a stale unmapped surface until
+     * destroy fires (which may be much later).
+     */
+    if (server->taskbar == toplevel) {
+        server->taskbar = NULL;
+
+        wlr_log(WLR_INFO,
+            "Taskbar unmapped — scanning for replacement");
+
+        taskbar_rescan_all(server);
+    }
+
+    /*
      * Cancel interactive operations.
      */
     if (toplevel == server->grabbed_toplevel) {
@@ -602,8 +627,10 @@ static void xdg_toplevel_destroy(
         toplevel->server;
 
     wlr_log(WLR_INFO,
-        "Toplevel destroyed: app_id=%s",
-        toplevel->xdg_toplevel->app_id ?: "(null)");
+        "Toplevel destroyed: app_id=%s title=\"%s\" is_taskbar=%d",
+        toplevel->xdg_toplevel->app_id ?: "(null)",
+        toplevel->xdg_toplevel->title ?: "",
+        (server->taskbar == toplevel));
 
     /*
      * Cancel grabs safely.
@@ -642,13 +669,14 @@ static void xdg_toplevel_destroy(
      */
 
     /*
-     * CRITICAL:
-     *
-     * ONLY NOW is it safe to refocus.
-     *
-     * The dying surface is gone.
+     * Schedule a deferred refocus.  This runs on the next
+     * event loop idle, after all pending destroys from this
+     * burst have been processed.  We never refocus
+     * immediately because Wine may be destroying multiple
+     * surfaces at once — activating a dying surface freezes
+     * the Wine session.
      */
-    refocus_next(server, toplevel);
+    schedule_refocus(server);
 
     wl_list_remove(&toplevel->map.link);
     wl_list_remove(&toplevel->unmap.link);

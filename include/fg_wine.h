@@ -15,19 +15,17 @@
 void launch_wine(struct fg_server *server, const char *socket);
 
 /*
+ * Respawn explorer.exe after unexpected exit.
+ * Wineserver keeps running, so no prefix init or registry import needed.
+ */
+void respawn_wine_explorer(struct fg_server *server);
+
+/*
  * Install a SIGCHLD handler that reaps Wine and terminates the
  * event loop when Wine exits.  Must be called once before the
  * event loop starts.  Stores a reference to `server` in a file-
  * scoped global (unavoidable with POSIX signal handlers).
  */
 void wine_install_sigchld(struct fg_server *server);
-
-// fg_wine.h — add after the wine_install_sigchld declaration:
-
-/*
- * Respawn explorer.exe after unexpected exit.
- * Wineserver keeps running, so no prefix init or registry import needed.
- */
-void respawn_wine_explorer(struct fg_server *server);
 
 #endif /* FG_WINE_H */

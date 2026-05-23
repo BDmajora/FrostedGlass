@@ -23,6 +23,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <assert.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -195,6 +196,15 @@ static void server_finish(struct fg_server *server) {
 
 int main(int argc, char *argv[]) {
     wlr_log_init(WLR_DEBUG, NULL);
+
+    /* Redirect compositor log to a file so we can debug post-mortem.
+     * wlr_log writes to stderr, so redirect stderr. */
+    int log_fd = open("/tmp/frostedglass.log",
+                      O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (log_fd >= 0) {
+        dup2(log_fd, STDERR_FILENO);
+        close(log_fd);
+    }
 
     const char *resolution = parse_args(argc, argv);
 

@@ -609,6 +609,24 @@ static void xdg_toplevel_destroy(
      */
     clear_focus_on_destroy(server);
 
+    /*
+     * Force taskbar visible.  Window destruction can leave the
+     * taskbar buried behind other scene nodes.  Re-raise and
+     * reposition it now — this is safe because we only do it
+     * in the destroy path, not on every commit.
+     */
+    if (server->taskbar &&
+        server->taskbar != toplevel &&
+        server->taskbar->xdg_toplevel &&
+        server->taskbar->xdg_toplevel->base &&
+        server->taskbar->xdg_toplevel->base->surface &&
+        server->taskbar->xdg_toplevel->base->surface->mapped) {
+
+        position_taskbar(server->taskbar);
+        wlr_scene_node_raise_to_top(
+            &server->taskbar->scene_tree->node);
+    }
+
     wl_list_remove(&toplevel->map.link);
     wl_list_remove(&toplevel->unmap.link);
     wl_list_remove(&toplevel->commit.link);

@@ -22,4 +22,12 @@ void launch_wine(struct fg_server *server, const char *socket);
  */
 void wine_install_sigchld(struct fg_server *server);
 
+// fg_wine.h — add after the wine_install_sigchld declaration:
+
+/*
+ * Respawn explorer.exe after unexpected exit.
+ * Wineserver keeps running, so no prefix init or registry import needed.
+ */
+void respawn_wine_explorer(struct fg_server *server);
+
 #endif /* FG_WINE_H */

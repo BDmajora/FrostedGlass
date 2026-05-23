@@ -58,18 +58,26 @@
 /* Argument parsing                                                   */
 /* ------------------------------------------------------------------ */
 
-static void parse_args(int argc, char *argv[]) {
+static const char *parse_args(int argc, char *argv[]) {
+    const char *resolution = NULL;
+
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--help") == 0 ||
+        if (strcmp(argv[i], "--res") == 0 && i + 1 < argc) {
+            resolution = argv[++i];
+        } else if (strcmp(argv[i], "--help") == 0 ||
                    strcmp(argv[i], "-h") == 0) {
             fprintf(stderr,
-                "Usage: frostedglass\n"
+                "Usage: frostedglass [--res WxH]\n"
                 "\n"
                 "Minimal Wayland compositor for YetiOS.\n"
                 "Launches Wine explorer.exe as the desktop shell.\n"
                 "\n"
                 "Part of the snow suite:\n"
                 "  snowcone (splash) -> snowfall (login) -> frostedglass (desktop)\n"
+                "\n"
+                "Options:\n"
+                "  --res WxH   Wine desktop resolution (e.g. 1920x1080).\n"
+                "              Omit for automatic (uses output native res).\n"
                 "\n"
                 "Compositor keybindings:\n"
                 "  Ctrl+Alt+Backspace   Kill compositor (emergency exit)\n"
@@ -79,6 +87,7 @@ static void parse_args(int argc, char *argv[]) {
             exit(0);
         }
     }
+    return resolution;
 }
 
 /* ------------------------------------------------------------------ */
@@ -197,9 +206,10 @@ int main(int argc, char *argv[]) {
         close(log_fd);
     }
 
-    parse_args(argc, argv);
+    const char *resolution = parse_args(argc, argv);
 
     struct fg_server server = {0};
+    server.wine_desktop_res = resolution;
 
     wine_install_sigchld(&server);
     server_init(&server);
@@ -222,6 +232,26 @@ int main(int argc, char *argv[]) {
 
     /* Store in our own env so respawn_wine_explorer can find it */
     setenv("WAYLAND_DISPLAY", socket, 1);
+
+    /*
+     * Auto-detect resolution from the first output if --res was not given.
+     * Wine needs an explicit resolution for /desktop=shell so it can
+     * position the taskbar correctly at the bottom of the screen.
+     * This mirrors what WSLK's autostart script did via wlr-randr.
+     */
+    static char auto_res[32];
+    if (!server.wine_desktop_res && !wl_list_empty(&server.outputs)) {
+        struct fg_output *first_output =
+            wl_container_of(server.outputs.next, first_output, link);
+        struct wlr_output *out = first_output->wlr_output;
+        if (out->width > 0 && out->height > 0) {
+            snprintf(auto_res, sizeof(auto_res), "%dx%d",
+                out->width, out->height);
+            server.wine_desktop_res = auto_res;
+            wlr_log(WLR_INFO, "Auto-detected output resolution: %s",
+                auto_res);
+        }
+    }
 
     launch_wine(&server, socket);
 

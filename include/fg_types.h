@@ -81,12 +81,6 @@ struct fg_server {
      * can enforce z-order and work-area constraints reliably. */
     struct fg_toplevel *taskbar;
 
-    /* Placeholder rect shown at the bottom of the screen while
-     * explorer is respawning, so the user never sees a bare
-     * blue flash where the taskbar was.  Should rarely be needed
-     * now that we don't use /desktop=shell, but kept as insurance. */
-    struct wlr_scene_rect *taskbar_placeholder;
-
     /* Desktop background — a solid-color rect in the scene graph that
      * sits behind all windows.  Created once, resized when outputs
      * change.  Gives us the classic blue desktop instead of black. */
@@ -100,6 +94,7 @@ struct fg_server {
     bool desktop_cursor_set;
 
     pid_t wine_pid;
+    const char *wine_desktop_res;           /* e.g. "1920x1080" or NULL=auto */
 
     /* Deferred refocus — when multiple surfaces are destroyed in a
      * burst (common with Wine control panels), we defer refocus to

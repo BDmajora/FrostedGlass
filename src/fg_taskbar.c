@@ -18,7 +18,6 @@
 
 #include "fg_taskbar.h"
 #include "fg_output.h"
-#include "fg_wine.h"
 
 /* ------------------------------------------------------------------ */
 /* Detection                                                          */
@@ -68,12 +67,6 @@ bool is_taskbar(struct fg_toplevel *toplevel) {
 
 void position_taskbar(struct fg_toplevel *toplevel) {
     struct fg_server *server = toplevel->server;
-
-    /* Real taskbar is back — remove the placeholder */
-    if (server->taskbar_placeholder) {
-        wlr_scene_node_destroy(&server->taskbar_placeholder->node);
-        server->taskbar_placeholder = NULL;
-    }
 
     server->taskbar = toplevel;
 
@@ -175,27 +168,6 @@ void taskbar_rescan_all(struct fg_server *server) {
     }
 
     wlr_log(WLR_INFO,
-        "Taskbar rescan found no candidate — respawning explorer");
-
-    /*
-     * Paint a placeholder rect where the taskbar was so the user
-     * never sees the bare blue desktop while explorer restarts.
-     * The placeholder is destroyed in position_taskbar() as soon
-     * as the real taskbar surface maps.
-     */
-    int screen_w, screen_h;
-    if (!server->taskbar_placeholder &&
-        server_get_screen_size(server, &screen_w, &screen_h)) {
-        int bar_h = 30;
-        float gray[4] = { 0.75f, 0.75f, 0.75f, 1.0f };
-        server->taskbar_placeholder = wlr_scene_rect_create(
-            &server->scene->tree, screen_w, bar_h, gray);
-        wlr_scene_node_set_position(
-            &server->taskbar_placeholder->node,
-            0, screen_h - bar_h);
-        wlr_scene_node_raise_to_top(
-            &server->taskbar_placeholder->node);
-    }
-
-    respawn_wine_explorer(server);
+        "Taskbar rescan found no candidate — "
+        "will retry on next map/commit");
 }

@@ -4,17 +4,6 @@
  * Spawns Wine explorer.exe as the desktop shell, optionally applying
  * a user registry file first.  A SIGCHLD handler reaps the Wine
  * process so the compositor can shut down cleanly when Wine exits.
- *
- * We launch "wine explorer" WITHOUT /desktop=shell.  The /desktop=
- * flag creates a virtual desktop container with lifecycle management:
- * when the last app window on that desktop closes, explorer decides
- * the desktop is "empty" and shuts down — taking the taskbar with it.
- *
- * Without /desktop=, explorer starts the persistent Windows shell
- * (taskbar, systray, Start menu) as regular xdg_toplevels.  The shell
- * process stays alive for the entire session because it IS the desktop
- * process.  The compositor handles taskbar positioning independently
- * via position_taskbar(), so Wine's virtual desktop is unnecessary.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -232,77 +221,17 @@ void launch_wine(struct fg_server *server, const char *socket) {
         /* Apply registry prefs (taskbar position, DPI, etc.) */
         apply_registry_prefs();
 
-        /*
-         * Start the Windows shell WITHOUT /desktop=shell.
-         *
-         * /desktop=shell creates a virtual desktop container with
-         * lifecycle management — when the last app window closes,
-         * explorer decides the desktop is "empty" and exits, killing
-         * the taskbar.
-         *
-         * Without /desktop=, explorer starts the persistent desktop
-         * shell (taskbar, systray, Start menu) whose lifetime is tied
-         * to the user session, not to any window count.  The compositor
-         * handles taskbar positioning via position_taskbar(), and Wine
-         * learns the screen geometry from the Wayland output events,
-         * so the virtual desktop container is unnecessary.
-         */
-        execlp("wine", "wine", "explorer", NULL);
+        const char *res = server->wine_desktop_res;
+        if (res) {
+            char desktop_arg[128];
+            snprintf(desktop_arg, sizeof(desktop_arg),
+                "/desktop=shell,%s", res);
+            execlp("wine", "wine", "explorer", desktop_arg, NULL);
+        } else {
+            execlp("wine", "wine", "explorer", "/desktop=shell", NULL);
+        }
         _exit(127);
     }
     server->wine_pid = pid;
     wlr_log(WLR_INFO, "Wine explorer.exe launched (pid %d)", pid);
-}
-
-/* ------------------------------------------------------------------ */
-/* Explorer respawn                                                   */
-/* ------------------------------------------------------------------ */
-
-/*
- * Respawn explorer.exe as a safety net.
- *
- * With the /desktop=shell removal this should rarely (if ever) be
- * needed, but we keep it for robustness — if explorer crashes or
- * is killed, the compositor can recover the taskbar.
- */
-void respawn_wine_explorer(struct fg_server *server) {
-    const char *socket = getenv("WAYLAND_DISPLAY");
-
-    if (!socket) {
-        socket = wl_display_add_socket_auto(server->display);
-        if (!socket) {
-            wlr_log(WLR_ERROR,
-                "Cannot respawn explorer: no WAYLAND_DISPLAY");
-            return;
-        }
-    }
-
-    wlr_log(WLR_INFO, "Respawning Wine explorer.exe ...");
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        wlr_log(WLR_ERROR, "fork() failed for Wine respawn");
-        return;
-    }
-    if (pid == 0) {
-        setenv("WAYLAND_DISPLAY", socket, 1);
-        unsetenv("DISPLAY");
-        setenv("WINEWAYLAND", "1", 1);
-        setenv("WAYLAND_DEBUG", "1", 1);
-        setenv("WINEDEBUG", "+waylanddrv", 1);
-
-        /* Append to existing log instead of truncating */
-        int log_fd = open("/tmp/wine_wayland_debug.log",
-                          O_CREAT | O_WRONLY | O_APPEND, 0644);
-        if (log_fd >= 0) {
-            dup2(log_fd, STDOUT_FILENO);
-            dup2(log_fd, STDERR_FILENO);
-            close(log_fd);
-        }
-
-        execlp("wine", "wine", "explorer", NULL);
-        _exit(127);
-    }
-    server->wine_pid = pid;
-    wlr_log(WLR_INFO, "Wine explorer.exe respawned (pid %d)", pid);
 }

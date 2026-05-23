@@ -235,3 +235,70 @@ void launch_wine(struct fg_server *server, const char *socket) {
     server->wine_pid = pid;
     wlr_log(WLR_INFO, "Wine explorer.exe launched (pid %d)", pid);
 }
+
+/* ------------------------------------------------------------------ */
+/* Explorer respawn                                                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Respawn explorer.exe after it exits unexpectedly.
+ *
+ * Wine's explorer.exe sometimes exits when control panel applets
+ * close.  The wineserver keeps running, so we just need to spawn
+ * a fresh explorer — no prefix init or registry import needed.
+ */
+void respawn_wine_explorer(struct fg_server *server) {
+    const char *socket = getenv("WAYLAND_DISPLAY");
+
+    /*
+     * Fall back: the compositor sets WAYLAND_DISPLAY before running,
+     * but if it's not in our env, we can't tell the child where to
+     * connect.  This shouldn't happen in practice.
+     */
+    if (!socket) {
+        /* Try to get it from the wl_display */
+        socket = wl_display_add_socket_auto(server->display);
+        if (!socket) {
+            wlr_log(WLR_ERROR,
+                "Cannot respawn explorer: no WAYLAND_DISPLAY");
+            return;
+        }
+    }
+
+    wlr_log(WLR_INFO, "Respawning Wine explorer.exe ...");
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        wlr_log(WLR_ERROR, "fork() failed for Wine respawn");
+        return;
+    }
+    if (pid == 0) {
+        setenv("WAYLAND_DISPLAY", socket, 1);
+        unsetenv("DISPLAY");
+        setenv("WINEWAYLAND", "1", 1);
+        setenv("WAYLAND_DEBUG", "1", 1);
+        setenv("WINEDEBUG", "+waylanddrv", 1);
+
+        /* Append to existing log instead of truncating */
+        int log_fd = open("/tmp/wine_wayland_debug.log",
+                          O_CREAT | O_WRONLY | O_APPEND, 0644);
+        if (log_fd >= 0) {
+            dup2(log_fd, STDOUT_FILENO);
+            dup2(log_fd, STDERR_FILENO);
+            close(log_fd);
+        }
+
+        const char *res = server->wine_desktop_res;
+        if (res) {
+            char desktop_arg[128];
+            snprintf(desktop_arg, sizeof(desktop_arg),
+                "/desktop=shell,%s", res);
+            execlp("wine", "wine", "explorer", desktop_arg, NULL);
+        } else {
+            execlp("wine", "wine", "explorer", "/desktop=shell", NULL);
+        }
+        _exit(127);
+    }
+    server->wine_pid = pid;
+    wlr_log(WLR_INFO, "Wine explorer.exe respawned (pid %d)", pid);
+}

@@ -134,22 +134,23 @@ void focus_toplevel(struct fg_toplevel *toplevel) {
  * NEVER clears focus if ANY mapped surface still exists.
  */
 /*
- * CRITICAL:
+ * CRITICAL — DO NOT TOUCH FOCUS IN THE DESTROY HANDLER.
  *
- * Wine destroys surfaces in unpredictable multi-batch bursts
- * from multiple threads.  ANY automatic refocusing after a
- * destroy risks activating a surface that Wine is about to
- * tear down in the next batch, which freezes the Wine session.
+ * wlroots internally clears keyboard focus when the focused
+ * surface is destroyed (via wl_resource destroy listeners on
+ * the seat).  We must not interfere:
  *
- * The only safe approach: clear keyboard focus on destroy.
- * The user clicks to focus the next window (or the taskbar).
- * This matches how a real Windows desktop behaves when the
- * last foreground window closes — focus goes to the desktop
- * (no window), and the user clicks to activate something.
+ * - Activating another surface → sends configure(activated)
+ *   to surfaces Wine may be tearing down → Wine freezes.
+ *
+ * - Clearing focus explicitly → Wine sees no window has focus,
+ *   interprets it as "session ending", kills explorer.exe,
+ *   which destroys the taskbar and all windows.
+ *
+ * The correct action is: do nothing.  Let wlroots handle the
+ * seat internally.  Wine's Win32 window manager handles focus
+ * transitions through its own message pump.
  */
-static void clear_focus_on_destroy(struct fg_server *server) {
-    wlr_seat_keyboard_clear_focus(server->seat);
-}
 
 /* ------------------------------------------------------------------ */
 /* Hit-testing                                                        */
@@ -604,16 +605,13 @@ static void xdg_toplevel_destroy(
      */
 
     /*
-     * Just clear focus — never activate another surface
-     * from a destroy handler.  The user clicks to refocus.
+     * Do NOT touch focus here.  See comment above.
+     * wlroots handles seat cleanup internally.
      */
-    clear_focus_on_destroy(server);
 
     /*
-     * Force taskbar visible.  Window destruction can leave the
-     * taskbar buried behind other scene nodes.  Re-raise and
-     * reposition it now — this is safe because we only do it
-     * in the destroy path, not on every commit.
+     * Re-raise taskbar if it exists — window destruction can
+     * leave it buried in the scene graph.
      */
     if (server->taskbar &&
         server->taskbar != toplevel &&

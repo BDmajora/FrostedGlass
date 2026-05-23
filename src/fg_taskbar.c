@@ -18,6 +18,7 @@
 
 #include "fg_taskbar.h"
 #include "fg_output.h"
+#include "fg_wine.h"
 
 /* ------------------------------------------------------------------ */
 /* Detection                                                          */
@@ -168,5 +169,7 @@ void taskbar_rescan_all(struct fg_server *server) {
     }
 
     wlr_log(WLR_INFO,
-        "Taskbar rescan found no candidate — will retry on next map/commit");
+        "Taskbar rescan found no candidate — respawning explorer");
+
+    respawn_wine_explorer(server);
 }

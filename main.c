@@ -230,6 +230,9 @@ int main(int argc, char *argv[]) {
 
     wlr_log(WLR_INFO, "frostedglass running on Wayland display %s", socket);
 
+    /* Store in our own env so respawn_wine_explorer can find it */
+    setenv("WAYLAND_DISPLAY", socket, 1);
+
     /*
      * Auto-detect resolution from the first output if --res was not given.
      * Wine needs an explicit resolution for /desktop=shell so it can

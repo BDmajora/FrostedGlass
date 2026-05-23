@@ -4,6 +4,17 @@
  * Spawns Wine explorer.exe as the desktop shell, optionally applying
  * a user registry file first.  A SIGCHLD handler reaps the Wine
  * process so the compositor can shut down cleanly when Wine exits.
+ *
+ * We launch "wine explorer" WITHOUT /desktop=shell.  The /desktop=
+ * flag creates a virtual desktop container with lifecycle management:
+ * when the last app window on that desktop closes, explorer decides
+ * the desktop is "empty" and shuts down — taking the taskbar with it.
+ *
+ * Without /desktop=, explorer starts the persistent Windows shell
+ * (taskbar, systray, Start menu) as regular xdg_toplevels.  The shell
+ * process stays alive for the entire session because it IS the desktop
+ * process.  The compositor handles taskbar positioning independently
+ * via position_taskbar(), so Wine's virtual desktop is unnecessary.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -221,15 +232,22 @@ void launch_wine(struct fg_server *server, const char *socket) {
         /* Apply registry prefs (taskbar position, DPI, etc.) */
         apply_registry_prefs();
 
-        const char *res = server->wine_desktop_res;
-        if (res) {
-            char desktop_arg[128];
-            snprintf(desktop_arg, sizeof(desktop_arg),
-                "/desktop=shell,%s", res);
-            execlp("wine", "wine", "explorer", desktop_arg, NULL);
-        } else {
-            execlp("wine", "wine", "explorer", "/desktop=shell", NULL);
-        }
+        /*
+         * Start the Windows shell WITHOUT /desktop=shell.
+         *
+         * /desktop=shell creates a virtual desktop container with
+         * lifecycle management — when the last app window closes,
+         * explorer decides the desktop is "empty" and exits, killing
+         * the taskbar.
+         *
+         * Without /desktop=, explorer starts the persistent desktop
+         * shell (taskbar, systray, Start menu) whose lifetime is tied
+         * to the user session, not to any window count.  The compositor
+         * handles taskbar positioning via position_taskbar(), and Wine
+         * learns the screen geometry from the Wayland output events,
+         * so the virtual desktop container is unnecessary.
+         */
+        execlp("wine", "wine", "explorer", NULL);
         _exit(127);
     }
     server->wine_pid = pid;
@@ -241,22 +259,16 @@ void launch_wine(struct fg_server *server, const char *socket) {
 /* ------------------------------------------------------------------ */
 
 /*
- * Respawn explorer.exe after it exits unexpectedly.
+ * Respawn explorer.exe as a safety net.
  *
- * Wine's explorer.exe sometimes exits when control panel applets
- * close.  The wineserver keeps running, so we just need to spawn
- * a fresh explorer — no prefix init or registry import needed.
+ * With the /desktop=shell removal this should rarely (if ever) be
+ * needed, but we keep it for robustness — if explorer crashes or
+ * is killed, the compositor can recover the taskbar.
  */
 void respawn_wine_explorer(struct fg_server *server) {
     const char *socket = getenv("WAYLAND_DISPLAY");
 
-    /*
-     * Fall back: the compositor sets WAYLAND_DISPLAY before running,
-     * but if it's not in our env, we can't tell the child where to
-     * connect.  This shouldn't happen in practice.
-     */
     if (!socket) {
-        /* Try to get it from the wl_display */
         socket = wl_display_add_socket_auto(server->display);
         if (!socket) {
             wlr_log(WLR_ERROR,
@@ -288,15 +300,7 @@ void respawn_wine_explorer(struct fg_server *server) {
             close(log_fd);
         }
 
-        const char *res = server->wine_desktop_res;
-        if (res) {
-            char desktop_arg[128];
-            snprintf(desktop_arg, sizeof(desktop_arg),
-                "/desktop=shell,%s", res);
-            execlp("wine", "wine", "explorer", desktop_arg, NULL);
-        } else {
-            execlp("wine", "wine", "explorer", "/desktop=shell", NULL);
-        }
+        execlp("wine", "wine", "explorer", NULL);
         _exit(127);
     }
     server->wine_pid = pid;

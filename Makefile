@@ -41,6 +41,7 @@ BIN := frostedglass
 MODULE_SRCS := $(SRCDIR)/fg_output.c   \
                $(SRCDIR)/fg_toplevel.c \
                $(SRCDIR)/fg_taskbar.c  \
+               $(SRCDIR)/fg_desktop.c  \
                $(SRCDIR)/fg_input.c    \
                $(SRCDIR)/fg_wine.c
 

@@ -15,6 +15,7 @@
 
 #include "fg_toplevel.h"
 #include "fg_taskbar.h"
+#include "fg_desktop.h"
 #include "fg_output.h"
 
 /* ------------------------------------------------------------------ */
@@ -58,6 +59,16 @@ void focus_toplevel(struct fg_toplevel *toplevel) {
     struct fg_server *server = toplevel->server;
 
     if (!server || !server->seat)
+        return;
+
+    /*
+     * Never focus or raise the desktop root window.  It must stay pinned
+     * at the bottom of the scene graph.  Clicking the wallpaper should
+     * not bring it in front of application windows (which is exactly what
+     * raise_to_top below would do) — same as clicking the desktop in real
+     * Windows doesn't bury your open windows.
+     */
+    if (server->desktop == toplevel)
         return;
 
     struct wlr_seat *seat = server->seat;
@@ -411,6 +422,21 @@ static void xdg_toplevel_map(
         toplevel->xdg_toplevel->app_id ?: "(null)",
         toplevel->xdg_toplevel->title ?: "");
 
+    /*
+     * Desktop root window — pin to the bottom and stop.  It must NOT be
+     * centered, clamped above the taskbar, or focused: it's the
+     * wallpaper layer, not an interactive window.
+     */
+    if (is_desktop(toplevel)) {
+
+        position_desktop(toplevel);
+
+        wlr_log(WLR_INFO,
+            "Desktop pinned to bottom on map");
+
+        return;
+    }
+
     if (is_taskbar(toplevel)) {
 
         position_taskbar(toplevel);
@@ -430,6 +456,14 @@ static void xdg_toplevel_map(
      */
     if (!server->taskbar) {
         taskbar_rescan_all(server);
+    }
+
+    /*
+     * Likewise, if we lost the desktop, a new map is a chance to
+     * recover it.
+     */
+    if (!server->desktop) {
+        desktop_rescan_all(server);
     }
 
     try_center(toplevel);
@@ -474,6 +508,20 @@ static void xdg_toplevel_unmap(
             "Taskbar unmapped — scanning for replacement");
 
         taskbar_rescan_all(server);
+    }
+
+    /*
+     * Desktop unmap — same treatment as the taskbar.  Clear the pointer
+     * now so commit handlers can re-detect a replacement immediately
+     * rather than holding a stale unmapped surface until destroy.
+     */
+    if (server->desktop == toplevel) {
+        server->desktop = NULL;
+
+        wlr_log(WLR_INFO,
+            "Desktop unmapped — scanning for replacement");
+
+        desktop_rescan_all(server);
     }
 
     /*
@@ -531,10 +579,29 @@ static void xdg_toplevel_commit(
     if (!toplevel_is_mapped(toplevel))
         return;
 
+    /*
+     * Desktop root window — re-assert bottom pin on every commit
+     * (idempotent) and stop.  Must skip taskbar detection, centering,
+     * and clamping.
+     */
+    if (server->desktop == toplevel) {
+        position_desktop(toplevel);
+        return;
+    }
+
     if (server->taskbar == toplevel) {
         position_taskbar(toplevel);
         return;
     }
+
+    /*
+     * Not yet identified — give both detectors a chance.  Desktop first
+     * (it's the more fundamental layer), then taskbar.
+     */
+    try_detect_desktop(toplevel);
+
+    if (server->desktop == toplevel)
+        return;
 
     try_detect_taskbar(toplevel);
 
@@ -591,6 +658,21 @@ static void xdg_toplevel_destroy(
             "Taskbar destroyed — scanning for replacement");
 
         taskbar_rescan_all(server);
+    }
+
+    /*
+     * Desktop cleanup — clear and try to re-acquire from remaining
+     * mapped toplevels.  This involves no focus changes (the desktop is
+     * never focused), so it's safe to do in the destroy handler unlike
+     * the focus operations forbidden below.
+     */
+    if (server->desktop == toplevel) {
+        server->desktop = NULL;
+
+        wlr_log(WLR_INFO,
+            "Desktop destroyed — scanning for replacement");
+
+        desktop_rescan_all(server);
     }
 
     /*

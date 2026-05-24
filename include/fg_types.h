@@ -81,17 +81,22 @@ struct fg_server {
      * can enforce z-order and work-area constraints reliably. */
     struct fg_toplevel *taskbar;
 
-    /* Desktop background — a solid-color rect in the scene graph that
-     * sits behind all windows.  Created once, resized when outputs
-     * change.  Gives us the classic blue desktop instead of black. */
-    struct wlr_scene_rect *background_rect;
+    /* Desktop root window (desktop.exe) — a full-screen Wine surface
+     * that paints the wallpaper and sits at the BOTTOM of the scene
+     * graph, beneath the taskbar and all app windows.  Tracked like the
+     * taskbar so we can re-pin it and recover it if Wine respawns it.
+     *
+     * Replaces the old compositor-painted background_rect: because this
+     * is a real Wine surface, the pointer is always over a Wine window,
+     * so Wine always sets its own cursor and the bare wlroots cursor is
+     * never shown. */
+    struct fg_toplevel *desktop;
 
-    /* Tracks whether the compositor has set the xcursor "default"
-     * image for the background rect.  Used to avoid spamming
-     * wlr_cursor_set_xcursor() on every motion event over the
-     * background; we only set it on the transition into the
-     * background, and reset it on any motion over a Wine surface. */
-    bool desktop_cursor_set;
+    /* Startup fallback background — a solid-color rect shown only during
+     * the brief gap between compositor start and desktop.exe mapping, so
+     * the screen isn't black.  Lowered below the desktop window and
+     * effectively hidden once the desktop maps. */
+    struct wlr_scene_rect *background_rect;
 
     pid_t wine_pid;
     const char *wine_desktop_res;           /* e.g. "1920x1080" or NULL=auto */

@@ -76,11 +76,18 @@ bool server_get_screen_size(struct fg_server *server, int *w, int *h) {
 /* ------------------------------------------------------------------ */
 
 /*
- * Classic Windows desktop blue: RGB(58, 110, 165).
- * This is what Wine's "Background" registry key maps to, but Wine
- * only paints it inside its own virtual desktop surface.  Since we
- * run individual xdg_toplevels (no Wine virtual desktop surface for
- * the background), we need the compositor to paint it.
+ * Startup-gap fallback background.
+ *
+ * The real desktop/wallpaper is now drawn by desktop.exe (a full-screen
+ * Wine window pinned to the bottom of the scene graph).  This rect exists
+ * only to avoid a black screen during the brief gap between compositor
+ * start and desktop.exe mapping.  Once the desktop window maps and is
+ * lowered to the bottom, it covers this rect, so the rect is no longer
+ * visible.
+ *
+ * Color is matched to desktop.exe's hard-coded light purple
+ * (RGB 200,170,235) so the boot transition is seamless rather than a
+ * jarring blue-then-purple flash.
  */
 void server_update_background(struct fg_server *server) {
     int total_w = 0, total_h = 0;
@@ -95,23 +102,27 @@ void server_update_background(struct fg_server *server) {
 
     if (total_w <= 0 || total_h <= 0) return;
 
-    /* Classic Windows blue */
-    float color[4] = { 58.0f/255.0f, 110.0f/255.0f, 165.0f/255.0f, 1.0f };
+    /* Light purple — matches desktop.exe's wallpaper fill */
+    float color[4] = { 200.0f/255.0f, 170.0f/255.0f, 235.0f/255.0f, 1.0f };
 
     if (!server->background_rect) {
         server->background_rect = wlr_scene_rect_create(
             &server->scene->tree, total_w, total_h, color);
         /* Push to the very bottom of the scene graph so it's behind
-         * every window */
+         * every window — including the desktop window, which is also
+         * lowered to bottom later but maps after this rect, leaving the
+         * desktop above the rect. */
         wlr_scene_node_lower_to_bottom(
             &server->background_rect->node);
-        wlr_log(WLR_INFO, "Background rect created: %dx%d", total_w, total_h);
+        wlr_log(WLR_INFO, "Fallback background rect created: %dx%d",
+            total_w, total_h);
     } else {
         wlr_scene_rect_set_size(server->background_rect, total_w, total_h);
         wlr_scene_rect_set_color(server->background_rect, color);
         wlr_scene_node_lower_to_bottom(
             &server->background_rect->node);
-        wlr_log(WLR_INFO, "Background rect resized: %dx%d", total_w, total_h);
+        wlr_log(WLR_INFO, "Fallback background rect resized: %dx%d",
+            total_w, total_h);
     }
 }
 

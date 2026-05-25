@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  yetios-cursor-v1.xml — Custom Wayland protocol for YetiOS cursor override.
+
+  This protocol allows a privileged client (Wine) to upload Win32 cursor
+  bitmaps to the frostedglass compositor.  The compositor caches these
+  cursors and forcibly overrides every other client's cursor requests
+  with the cached Win32 images.
+
+  The result: every window on the desktop — Wine or native Linux — shows
+  the authentic Win32 cursor (arrow, I-beam, resize handles, etc.) loaded
+  directly from Wine's user32.dll / .cur files.
+
+  This is believed to be the first Wayland compositor to implement
+  cross-client cursor hijacking via a custom protocol.
+
+  Flow:
+    1. Wine binds to yetios_cursor_manager_v1.
+    2. Wine creates wl_surfaces, attaches cursor bitmaps, commits them.
+    3. Wine calls set_cursor_image(shape_id, surface, hotspot_x, hotspot_y)
+       for each standard Win32 cursor shape (IDC_ARROW, IDC_IBEAM, etc.).
+    4. The compositor caches these surfaces.
+    5. When ANY non-Wine client requests a cursor change, the compositor
+       ignores their request and paints the cached Win32 cursor instead.
+    6. Wine itself is not hijacked — it manages its own cursor normally.
+-->
+<protocol name="yetios_cursor_v1">
+
+  <interface name="yetios_cursor_manager_v1" version="1">
+    <description summary="system-wide cursor override manager">
+      Allows a privileged client to define system-wide cursor images
+      that the compositor will force onto all other clients.
+
+      Only one client may bind this interface at a time.  The first
+      client to bind becomes the cursor provider; subsequent binds
+      are rejected.  When the provider disconnects, all cached cursors
+      are cleared and normal cursor behavior resumes.
+    </description>
+
+    <request name="set_cursor_image">
+      <description summary="upload a cursor image for a shape ID">
+        Register a wl_surface as the cursor image for the given shape.
+        The surface must have committed content (wl_surface.attach +
+        wl_surface.commit) before this request is sent.
+
+        The compositor caches the surface and uses it to override
+        cursor requests from all non-provider clients.  Calling this
+        again with the same shape_id replaces the previous entry.
+
+        Shape IDs use Win32 cursor constants:
+          IDC_ARROW      = 32512  (normal select)
+          IDC_IBEAM      = 32513  (text select)
+          IDC_WAIT       = 32514  (busy)
+          IDC_CROSS      = 32515  (precision select)
+          IDC_UPARROW    = 32516  (alternate select)
+          IDC_SIZENWSE   = 32642  (diagonal resize NW-SE)
+          IDC_SIZENESW   = 32643  (diagonal resize NE-SW)
+          IDC_SIZEWE     = 32644  (horizontal resize)
+          IDC_SIZENS     = 32645  (vertical resize)
+          IDC_SIZEALL    = 32646  (move)
+          IDC_NO         = 32648  (unavailable)
+          IDC_HAND       = 32649  (link select)
+          IDC_APPSTARTING = 32650 (working in background)
+          IDC_HELP       = 32651  (help select)
+      </description>
+      <arg name="shape_id" type="uint" summary="Win32 cursor shape constant"/>
+      <arg name="surface" type="object" interface="wl_surface"
+           summary="surface containing the cursor bitmap"/>
+      <arg name="hotspot_x" type="int" summary="hotspot X offset in pixels"/>
+      <arg name="hotspot_y" type="int" summary="hotspot Y offset in pixels"/>
+    </request>
+
+    <request name="remove_cursor_image">
+      <description summary="remove a cached cursor image">
+        Remove the cached cursor for the given shape ID.  If no cursor
+        is cached for this shape, this request is a no-op.
+      </description>
+      <arg name="shape_id" type="uint" summary="Win32 cursor shape to remove"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="release the cursor manager">
+        Destroy the cursor manager binding.  All cached cursor surfaces
+        are released and normal cursor behavior resumes for all clients.
+      </description>
+    </request>
+  </interface>
+
+</protocol>

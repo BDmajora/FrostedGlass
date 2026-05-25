@@ -101,6 +101,12 @@ struct fg_server {
     pid_t wine_pid;
     const char *wine_desktop_res;           /* e.g. "1920x1080" or NULL=auto */
 
+    /* Win32 cursor override subsystem — caches authentic Win32 cursors
+     * uploaded by Wine via the yetios_cursor_manager_v1 protocol and
+     * forces them onto all non-Wine clients.  When active, every window
+     * on the desktop shows Win32 cursors regardless of toolkit. */
+    struct fg_cursor_override *cursor_override;
+
     /* Deferred refocus — when multiple surfaces are destroyed in a
      * burst (common with Wine control panels), we defer refocus to
      * an idle callback so all destroys are processed first.  This

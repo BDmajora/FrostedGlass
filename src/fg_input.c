@@ -21,6 +21,7 @@
 
 #include "fg_input.h"
 #include "fg_toplevel.h"   /* focus_toplevel(), toplevel_at() */
+#include "fg_cursor_override.h"
 
 /* ------------------------------------------------------------------ */
 /* Compositor keybindings                                             */
@@ -275,10 +276,58 @@ void seat_request_cursor(struct wl_listener *listener, void *data) {
     struct wlr_seat_pointer_request_set_cursor_event *event = data;
     struct wlr_seat_client *focused =
         server->seat->pointer_state.focused_client;
-    if (focused == event->seat_client) {
-        wlr_cursor_set_surface(server->cursor, event->surface,
-            event->hotspot_x, event->hotspot_y);
+    if (focused != event->seat_client) return;
+
+    /*
+     * === WIN32 CURSOR OVERRIDE (yetios_cursor_manager_v1) ===
+     *
+     * If the cursor override subsystem is active (Wine has uploaded
+     * cached Win32 cursors), we hijack cursor requests from non-Wine
+     * clients.  Instead of displaying the Linux app's cursor, we
+     * silently substitute the cached Win32 arrow cursor.
+     *
+     * Wine itself is never hijacked — it manages its own cursor through
+     * the normal wl_pointer.set_cursor path (which gives it the correct
+     * per-context cursor: I-beam in text fields, resize handles on
+     * window edges, etc.).
+     *
+     * This means:
+     *   - Wine windows: authentic per-context Win32 cursors (normal path)
+     *   - Linux windows: forced Win32 arrow cursor (hijacked)
+     *   - No window (startup gap): xcursor fallback (pre-override path)
+     */
+    if (cursor_override_active(server->cursor_override)) {
+        struct wlr_surface *focused_surface =
+            server->seat->pointer_state.focused_surface;
+        if (focused_surface) {
+            struct wl_client *focused_client =
+                wl_resource_get_client(focused_surface->resource);
+
+            if (!cursor_override_is_provider(server->cursor_override,
+                                             focused_client)) {
+                /*
+                 * Non-Wine client — HIJACK.
+                 *
+                 * Ignore event->surface entirely.  Force the cached
+                 * Win32 arrow cursor over this window.
+                 */
+                struct wlr_surface *override_surface;
+                int ohx, ohy;
+                if (cursor_override_get_default(server->cursor_override,
+                                                &override_surface,
+                                                &ohx, &ohy)) {
+                    wlr_cursor_set_surface(server->cursor,
+                        override_surface, ohx, ohy);
+                    return;  /* request silently dropped */
+                }
+                /* No cached arrow — fall through to normal behavior */
+            }
+        }
     }
+
+    /* Normal path: Wine or fallback — honor the client's cursor */
+    wlr_cursor_set_surface(server->cursor, event->surface,
+        event->hotspot_x, event->hotspot_y);
 }
 
 void seat_request_set_selection(struct wl_listener *listener, void *data) {

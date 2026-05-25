@@ -53,6 +53,7 @@
 #include "fg_toplevel.h"
 #include "fg_input.h"
 #include "fg_wine.h"
+#include "fg_cursor_override.h"
 
 /* ------------------------------------------------------------------ */
 /* Argument parsing                                                   */
@@ -197,6 +198,15 @@ static bool server_init(struct fg_server *server) {
     wl_signal_add(&server->seat->events.request_set_selection,
         &server->request_set_selection);
 
+    /* Win32 cursor override — custom yetios_cursor_manager_v1 protocol.
+     * Creates the wl_global that Wine will bind to upload cursor bitmaps.
+     * Once Wine registers, all non-Wine cursor requests are hijacked. */
+    server->cursor_override = cursor_override_init(server);
+    if (!server->cursor_override) {
+        wlr_log(WLR_ERROR, "Failed to init cursor override — "
+            "Win32 cursor hijacking disabled");
+    }
+
     return true;
 }
 
@@ -211,6 +221,9 @@ static void server_finish(struct fg_server *server) {
     }
 
     wl_display_destroy_clients(server->display);
+
+    cursor_override_destroy(server->cursor_override);
+
     wlr_scene_node_destroy(&server->scene->tree.node);
     wlr_xcursor_manager_destroy(server->cursor_mgr);
     wlr_cursor_destroy(server->cursor);

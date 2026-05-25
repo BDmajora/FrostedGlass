@@ -9,12 +9,15 @@
 #define FG_TYPES_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include <wayland-server-core.h>
 
 #include <wlr/backend.h>
 #include <wlr/render/allocator.h>
 #include <wlr/render/wlr_renderer.h>
+
+#include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_keyboard.h>
@@ -22,8 +25,20 @@
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
+#include <wlr/types/wlr_surface.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_shell.h>
+
+/* ------------------------------------------------------------------ */
+/* Forward declarations                                               */
+/* ------------------------------------------------------------------ */
+
+struct fg_server;
+struct fg_output;
+struct fg_toplevel;
+struct fg_popup;
+struct fg_keyboard;
+struct fg_cursor_override;
 
 /* ------------------------------------------------------------------ */
 /* Enums                                                              */
@@ -41,6 +56,7 @@ enum fg_cursor_mode {
 
 struct fg_server {
     struct wl_display *display;
+
     struct wlr_backend *backend;
     struct wlr_renderer *renderer;
     struct wlr_allocator *allocator;
@@ -49,17 +65,24 @@ struct fg_server {
     struct wlr_scene_output_layout *scene_layout;
 
     struct wlr_output_layout *output_layout;
+
+    /* Outputs */
     struct wl_list outputs;                 /* fg_output.link */
     struct wl_listener new_output;
 
+    /* XDG shell */
     struct wlr_xdg_shell *xdg_shell;
+
     struct wl_list toplevels;               /* fg_toplevel.link */
     struct wl_listener new_xdg_toplevel;
     struct wl_listener new_xdg_popup;
 
+    /* Input */
     struct wlr_seat *seat;
+
     struct wlr_cursor *cursor;
     struct wlr_xcursor_manager *cursor_mgr;
+
     struct wl_listener cursor_motion;
     struct wl_listener cursor_motion_absolute;
     struct wl_listener cursor_button;
@@ -67,68 +90,105 @@ struct fg_server {
     struct wl_listener cursor_frame;
 
     struct wl_list keyboards;               /* fg_keyboard.link */
+
     struct wl_listener new_input;
     struct wl_listener request_set_cursor;
     struct wl_listener request_set_selection;
 
+    /* Interactive move/resize state */
     enum fg_cursor_mode cursor_mode;
+
     struct fg_toplevel *grabbed_toplevel;
-    double grab_x, grab_y;
+
+    double grab_x;
+    double grab_y;
+
     struct wlr_box grab_geobox;
     uint32_t resize_edges;
 
-    /* Taskbar tracking — kept separate from the toplevels list so we
-     * can enforce z-order and work-area constraints reliably. */
+    /* Special tracked windows */
     struct fg_toplevel *taskbar;
 
-    /* Desktop root window (desktop.exe) — a full-screen Wine surface
-     * that paints the wallpaper and sits at the BOTTOM of the scene
-     * graph, beneath the taskbar and all app windows.  Tracked like the
-     * taskbar so we can re-pin it and recover it if Wine respawns it.
+    /*
+     * Desktop root window (desktop.exe).
      *
-     * Replaces the old compositor-painted background_rect: because this
-     * is a real Wine surface, the pointer is always over a Wine window,
-     * so Wine always sets its own cursor and the bare wlroots cursor is
-     * never shown. */
+     * Full-screen Wine surface pinned beneath all other windows.
+     */
     struct fg_toplevel *desktop;
 
-    /* Startup fallback background — a solid-color rect shown only during
-     * the brief gap between compositor start and desktop.exe mapping, so
-     * the screen isn't black.  Lowered below the desktop window and
-     * effectively hidden once the desktop maps. */
+    /*
+     * Temporary compositor-painted background shown only before
+     * desktop.exe appears.
+     */
     struct wlr_scene_rect *background_rect;
 
+    /* Wine */
     pid_t wine_pid;
-    const char *wine_desktop_res;           /* e.g. "1920x1080" or NULL=auto */
 
-    /* Win32 cursor override subsystem — caches authentic Win32 cursors
-     * uploaded by Wine via the yetios_cursor_manager_v1 protocol and
-     * forces them onto all non-Wine clients.  When active, every window
-     * on the desktop shows Win32 cursors regardless of toolkit. */
+    /*
+     * e.g. "1920x1080"
+     * NULL = auto-detect from first output
+     */
+    const char *wine_desktop_res;
+
+    /* Win32 cursor override subsystem */
     struct fg_cursor_override *cursor_override;
 
-    /* === Simple universal cursor (no protocol required) ===
+    /* ------------------------------------------------------------------
+     * Sticky/captured Win32 cursor system
+     * ------------------------------------------------------------------
      *
-     * The last *real* cursor image a client set via wl_pointer.set_cursor.
-     * In a Wine desktop this is always Wine's authentic Win32 bitmap
-     * (arrow/I-beam/resize/etc.), because Wine owns every window.
-     *
-     * We "promote" it to the system cursor and re-apply it whenever the
-     * compositor would otherwise fall back to the bare wlroots/xcursor
-     * image — e.g. focus gaps, or a window that never sets a cursor.
-     * This keeps the authentic Win32 cursor on screen at all times
-     * without any Wine-side cooperation. */
+     * The compositor captures Wine's real cursor bitmaps from
+     * wl_pointer.set_cursor() and reuses them globally so the
+     * desktop never falls back to a Linux xcursor.
+     */
+
+    /*
+     * Last cursor surface received from Wine.
+     */
     struct wlr_surface *system_cursor_surface;
+
+    /*
+     * Compositor-owned cursor buffer.
+     *
+     * Starts as the embedded boot Win32 arrow and later becomes
+     * the current captured Wine cursor buffer.
+     */
+    struct wlr_buffer *system_cursor_buffer;
+
+    /*
+     * Current cursor scale.
+     */
+    float system_cursor_scale;
+
+    /*
+     * Cursor hotspot.
+     */
     int system_cursor_hotspot_x;
     int system_cursor_hotspot_y;
-    struct wl_listener system_cursor_destroy;
+
+    /*
+     * Whether we currently have a valid system cursor.
+     */
     bool have_system_cursor;
 
-    /* Deferred refocus — when multiple surfaces are destroyed in a
-     * burst (common with Wine control panels), we defer refocus to
-     * an idle callback so all destroys are processed first.  This
-     * avoids sending activation events to surfaces Wine is tearing
-     * down, which can freeze/deadlock Wine. */
+    /*
+     * Cursor tracking listeners.
+     *
+     * Used by the buffer-based sticky cursor implementation.
+     */
+    struct wl_listener tracked_cursor_commit;
+    struct wl_listener tracked_cursor_destroy;
+
+    /* ------------------------------------------------------------------
+     * Deferred refocus
+     * ------------------------------------------------------------------ */
+
+    /*
+     * When Wine destroys multiple surfaces in a burst, we defer
+     * refocus to an idle callback to avoid activating surfaces
+     * mid-destruction.
+     */
     bool refocus_pending;
 };
 
@@ -138,9 +198,12 @@ struct fg_server {
 
 struct fg_output {
     struct wl_list link;
+
     struct fg_server *server;
+
     struct wlr_output *wlr_output;
     struct wlr_scene_output *scene_output;
+
     struct wl_listener frame;
     struct wl_listener request_state;
     struct wl_listener destroy;
@@ -152,15 +215,22 @@ struct fg_output {
 
 struct fg_toplevel {
     struct wl_list link;
+
     struct fg_server *server;
+
     struct wlr_xdg_toplevel *xdg_toplevel;
     struct wlr_scene_tree *scene_tree;
-    bool centered;  /* true once the compositor has positioned this window */
+
+    /*
+     * True once the compositor has chosen an initial position.
+     */
+    bool centered;
 
     struct wl_listener map;
     struct wl_listener unmap;
     struct wl_listener commit;
     struct wl_listener destroy;
+
     struct wl_listener request_move;
     struct wl_listener request_resize;
     struct wl_listener request_maximize;
@@ -168,11 +238,12 @@ struct fg_toplevel {
 };
 
 /* ------------------------------------------------------------------ */
-/* Per-popup state (menus, tooltips, dropdowns)                       */
+/* Per-popup state (menus/tooltips/dropdowns)                         */
 /* ------------------------------------------------------------------ */
 
 struct fg_popup {
     struct wlr_xdg_popup *xdg_popup;
+
     struct wl_listener commit;
     struct wl_listener destroy;
 };
@@ -183,26 +254,29 @@ struct fg_popup {
 
 struct fg_keyboard {
     struct wl_list link;
+
     struct fg_server *server;
     struct wlr_keyboard *wlr_keyboard;
+
     struct wl_listener modifiers;
     struct wl_listener key;
     struct wl_listener destroy;
 };
 
 /* ------------------------------------------------------------------ */
-/* wlroots version compatibility                                      */
+/* wlroots compatibility helpers                                      */
 /* ------------------------------------------------------------------ */
 
 /*
  * wlr_xdg_surface_get_geometry() was removed in wlroots 0.19+.
- * The geometry is now read directly from the struct field.
- * WLR_VERSION_MINOR is defined in <wlr/version.h> (0.18+).
+ * Newer wlroots exposes geometry directly in the struct.
  */
+
 #include <wlr/version.h>
 
 static inline void fg_xdg_surface_get_geometry(
-    struct wlr_xdg_surface *surface, struct wlr_box *box) {
+    struct wlr_xdg_surface *surface,
+    struct wlr_box *box) {
 #if WLR_VERSION_MINOR < 19
     wlr_xdg_surface_get_geometry(surface, box);
 #else

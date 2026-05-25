@@ -135,6 +135,136 @@ static void server_new_keyboard(struct fg_server *server,
 /* Cursor / pointer motion                                            */
 /* ------------------------------------------------------------------ */
 
+/*
+ * === CURSOR DEBUG INSTRUMENTATION ===
+ *
+ * These helpers exist to diagnose why the wrong cursor is shown.  They
+ * answer three questions from the logs:
+ *   1. Is Wine ever calling wl_pointer.set_cursor at all?
+ *   2. What window (app_id) is under the pointer when it does/doesn't?
+ *   3. Is the cursor-override subsystem active, and is it hijacking?
+ *
+ * Grep the compositor log for "CURSOR-DBG" to see the full trace.
+ */
+
+/* Find the app_id of the toplevel that owns a given surface. */
+static const char *dbg_surface_app_id(struct fg_server *server,
+    struct wlr_surface *surface) {
+    if (!surface) return "(no-surface)";
+
+    if (server->desktop &&
+        server->desktop->xdg_toplevel &&
+        server->desktop->xdg_toplevel->base &&
+        server->desktop->xdg_toplevel->base->surface == surface)
+        return "DESKTOP";
+
+    if (server->taskbar &&
+        server->taskbar->xdg_toplevel &&
+        server->taskbar->xdg_toplevel->base &&
+        server->taskbar->xdg_toplevel->base->surface == surface)
+        return "TASKBAR";
+
+    struct fg_toplevel *tl;
+    wl_list_for_each(tl, &server->toplevels, link) {
+        if (tl->xdg_toplevel &&
+            tl->xdg_toplevel->base &&
+            tl->xdg_toplevel->base->surface == surface) {
+            return tl->xdg_toplevel->app_id ?: "(null-app_id)";
+        }
+    }
+    return "(unmatched-surface)";
+}
+
+/*
+ * Log pointer-focus changes only (not every motion event) to avoid
+ * spamming the log on the motion hot path.  Returns true if the state
+ * changed since the last call.
+ */
+static bool dbg_focus_changed(struct wlr_surface *surface) {
+    static struct wlr_surface *last_surface = (void *)-1;
+    if (surface == last_surface) return false;
+    last_surface = surface;
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Universal system cursor (capture Wine's real cursor, reuse it)     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Fired if the surface backing our captured system cursor is destroyed
+ * (e.g. Wine tears it down).  Clear our reference so we never use-after-
+ * free, and fall back to the xcursor default on the next gap.
+ */
+static void system_cursor_destroy(struct wl_listener *listener, void *data) {
+    (void)data;
+    struct fg_server *server =
+        wl_container_of(listener, server, system_cursor_destroy);
+
+    server->system_cursor_surface = NULL;
+    server->have_system_cursor = false;
+    wl_list_remove(&server->system_cursor_destroy.link);
+    wl_list_init(&server->system_cursor_destroy.link);
+
+    wlr_log(WLR_INFO,
+        "CURSOR-DBG: captured system cursor surface destroyed — cleared");
+}
+
+/*
+ * Remember the cursor a client just set as the "system cursor".  We hook
+ * its destroy event so we can drop the reference if it goes away.  Called
+ * from seat_request_cursor whenever a real (non-hidden) cursor is set.
+ */
+static void remember_system_cursor(struct fg_server *server,
+    struct wlr_surface *surface, int hx, int hy) {
+    if (!surface) return;
+
+    /* Same surface — just refresh the hotspot, keep the listener. */
+    if (server->have_system_cursor &&
+        server->system_cursor_surface == surface) {
+        server->system_cursor_hotspot_x = hx;
+        server->system_cursor_hotspot_y = hy;
+        return;
+    }
+
+    /* Replacing a previous capture — drop its destroy listener first. */
+    if (server->have_system_cursor && server->system_cursor_surface) {
+        wl_list_remove(&server->system_cursor_destroy.link);
+        wl_list_init(&server->system_cursor_destroy.link);
+    }
+
+    server->system_cursor_surface = surface;
+    server->system_cursor_hotspot_x = hx;
+    server->system_cursor_hotspot_y = hy;
+    server->have_system_cursor = true;
+
+    server->system_cursor_destroy.notify = system_cursor_destroy;
+    wl_signal_add(&surface->events.destroy,
+        &server->system_cursor_destroy);
+
+    wlr_log(WLR_INFO,
+        "CURSOR-DBG: captured Wine cursor as system cursor "
+        "(hotspot %d,%d) — will reuse on gaps", hx, hy);
+}
+
+/*
+ * Apply the best available "default" cursor when no client cursor is
+ * active.  Prefers the captured authentic Win32 cursor; falls back to
+ * the xcursor theme only if we've never seen a real cursor yet (the
+ * brief startup gap before Wine's first set_cursor).
+ */
+static void apply_fallback_cursor(struct fg_server *server) {
+    if (server->have_system_cursor && server->system_cursor_surface) {
+        wlr_cursor_set_surface(server->cursor,
+            server->system_cursor_surface,
+            server->system_cursor_hotspot_x,
+            server->system_cursor_hotspot_y);
+    } else {
+        wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr,
+            "default");
+    }
+}
+
 static void process_cursor_motion(struct fg_server *server,
     uint32_t time) {
     if (server->cursor_mode == FG_CURSOR_MOVE) {
@@ -195,18 +325,48 @@ static void process_cursor_motion(struct fg_server *server,
          * seat focus.  No flag/state needed: this path is transient and
          * not on the steady-state motion hot path.
          */
-        if (!server->desktop) {
-            wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr,
-                "default");
+        if (dbg_focus_changed(NULL)) {
+            wlr_log(WLR_INFO,
+                "CURSOR-DBG motion: NO toplevel under pointer (%.0f,%.0f) "
+                "desktop=%s taskbar=%s have_system_cursor=%s",
+                server->cursor->x, server->cursor->y,
+                server->desktop ? "mapped" : "NULL",
+                server->taskbar ? "mapped" : "NULL",
+                server->have_system_cursor ? "yes(reusing Win32)"
+                                           : "no(xcursor default)");
         }
+        /*
+         * Keep a valid cursor on screen.  Prefer the captured authentic
+         * Win32 cursor; only fall back to the xcursor theme during the
+         * very first gap before Wine has ever set a cursor.
+         *
+         * Note: this used to be gated on `!server->desktop`, which meant
+         * that once the desktop mapped, any gap left a stale cursor.  We
+         * now always re-assert a good cursor so the Win32 image never
+         * reverts to a Linux arrow.
+         */
+        apply_fallback_cursor(server);
         wlr_seat_pointer_clear_focus(server->seat);
         return;
     }
 
     if (surface) {
+        if (dbg_focus_changed(surface)) {
+            wlr_log(WLR_INFO,
+                "CURSOR-DBG motion: pointer over app_id=%s at (%.0f,%.0f) "
+                "-> notify_enter (Wine should now call set_cursor)",
+                dbg_surface_app_id(server, surface),
+                server->cursor->x, server->cursor->y);
+        }
         wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
         wlr_seat_pointer_notify_motion(server->seat, time, sx, sy);
     } else {
+        if (dbg_focus_changed(NULL)) {
+            wlr_log(WLR_INFO,
+                "CURSOR-DBG motion: toplevel found but NO surface "
+                "at (%.0f,%.0f) -> clearing focus",
+                server->cursor->x, server->cursor->y);
+        }
         wlr_seat_pointer_clear_focus(server->seat);
     }
 }
@@ -276,7 +436,29 @@ void seat_request_cursor(struct wl_listener *listener, void *data) {
     struct wlr_seat_pointer_request_set_cursor_event *event = data;
     struct wlr_seat_client *focused =
         server->seat->pointer_state.focused_client;
-    if (focused != event->seat_client) return;
+
+    /*
+     * === CURSOR DEBUG ===
+     * This log fires EVERY time a client asks to set the cursor.  If you
+     * NEVER see "CURSOR-DBG set_cursor" in the log, that means Wine is
+     * not setting any cursor at all — the visible pointer is then just
+     * the leftover wlroots/xcursor image, which is THE BUG.
+     */
+    struct wlr_surface *focused_surface =
+        server->seat->pointer_state.focused_surface;
+    const char *over_app = dbg_surface_app_id(server, focused_surface);
+    bool client_matches = (focused == event->seat_client);
+
+    wlr_log(WLR_INFO,
+        "CURSOR-DBG set_cursor: requesting_client_focused=%s "
+        "over_app=%s req_surface=%s hotspot=(%d,%d) override_active=%s",
+        client_matches ? "yes" : "no(IGNORED)",
+        over_app,
+        event->surface ? "yes" : "NULL(hide)",
+        event->hotspot_x, event->hotspot_y,
+        cursor_override_active(server->cursor_override) ? "yes" : "no");
+
+    if (!client_matches) return;
 
     /*
      * === WIN32 CURSOR OVERRIDE (yetios_cursor_manager_v1) ===
@@ -297,14 +479,14 @@ void seat_request_cursor(struct wl_listener *listener, void *data) {
      *   - No window (startup gap): xcursor fallback (pre-override path)
      */
     if (cursor_override_active(server->cursor_override)) {
-        struct wlr_surface *focused_surface =
-            server->seat->pointer_state.focused_surface;
         if (focused_surface) {
             struct wl_client *focused_client =
                 wl_resource_get_client(focused_surface->resource);
 
-            if (!cursor_override_is_provider(server->cursor_override,
-                                             focused_client)) {
+            bool is_provider = cursor_override_is_provider(
+                server->cursor_override, focused_client);
+
+            if (!is_provider) {
                 /*
                  * Non-Wine client — HIJACK.
                  *
@@ -316,18 +498,41 @@ void seat_request_cursor(struct wl_listener *listener, void *data) {
                 if (cursor_override_get_default(server->cursor_override,
                                                 &override_surface,
                                                 &ohx, &ohy)) {
+                    wlr_log(WLR_INFO,
+                        "CURSOR-DBG -> HIJACK: non-provider app '%s', "
+                        "forcing cached Win32 arrow", over_app);
                     wlr_cursor_set_surface(server->cursor,
                         override_surface, ohx, ohy);
                     return;  /* request silently dropped */
                 }
+                wlr_log(WLR_INFO,
+                    "CURSOR-DBG -> override active but NO cached arrow; "
+                    "falling through to client cursor");
                 /* No cached arrow — fall through to normal behavior */
+            } else {
+                wlr_log(WLR_INFO,
+                    "CURSOR-DBG -> provider (Wine) app '%s' sets its own "
+                    "cursor (not hijacked)", over_app);
             }
         }
     }
 
     /* Normal path: Wine or fallback — honor the client's cursor */
+    wlr_log(WLR_INFO,
+        "CURSOR-DBG -> applying client cursor surface (%s) for app '%s'",
+        event->surface ? "image" : "hidden", over_app);
     wlr_cursor_set_surface(server->cursor, event->surface,
         event->hotspot_x, event->hotspot_y);
+
+    /*
+     * Capture this cursor as the system cursor so we can re-assert it
+     * on focus gaps (keeps the authentic Win32 image on screen at all
+     * times).  Only capture real images, not cursor-hide requests.
+     */
+    if (event->surface) {
+        remember_system_cursor(server, event->surface,
+            event->hotspot_x, event->hotspot_y);
+    }
 }
 
 void seat_request_set_selection(struct wl_listener *listener, void *data) {

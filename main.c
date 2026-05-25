@@ -171,7 +171,22 @@ static bool server_init(struct fg_server *server) {
     /* Cursor */
     server->cursor = wlr_cursor_create();
     wlr_cursor_attach_output_layout(server->cursor, server->output_layout);
-    server->cursor_mgr = wlr_xcursor_manager_create(NULL, 24);
+
+    /*
+     * Cursor theme for the boot/fallback cursor.  This is only shown
+     * during the brief gap before Wine sets its first (authentic Win32)
+     * cursor; after that the compositor captures and reuses Wine's real
+     * cursor.  To make even the boot cursor look Win32, install a
+     * Windows-style Xcursor theme and point this at it:
+     *
+     *     FROSTEDGLASS_CURSOR_THEME=Windows frostedglass
+     *
+     * NULL theme = system default (XCURSOR_THEME env or "default"). */
+    const char *cursor_theme = getenv("FROSTEDGLASS_CURSOR_THEME");
+    server->cursor_mgr = wlr_xcursor_manager_create(cursor_theme, 24);
+    if (cursor_theme) {
+        wlr_log(WLR_INFO, "Cursor theme: %s", cursor_theme);
+    }
 
     server->cursor_motion.notify = cursor_motion;
     wl_signal_add(&server->cursor->events.motion, &server->cursor_motion);
@@ -273,6 +288,17 @@ int main(int argc, char *argv[]) {
     }
 
     wlr_log(WLR_INFO, "frostedglass running on Wayland display %s", socket);
+
+    /*
+     * Set an initial cursor image immediately so the pointer is never
+     * blank or stuck on a garbage image during boot.  This is replaced
+     * by Wine's authentic Win32 cursor as soon as Wine sets one (and the
+     * compositor then keeps reusing that real cursor).  Load the theme's
+     * cursor at scale 1 first so the image is ready.
+     */
+    wlr_xcursor_manager_load(server.cursor_mgr, 1.0f);
+    wlr_cursor_set_xcursor(server.cursor, server.cursor_mgr, "default");
+    wlr_log(WLR_INFO, "CURSOR-DBG: initial boot cursor set ('default')");
 
     /* Store in our own env so respawn_wine_explorer can find it */
     setenv("WAYLAND_DISPLAY", socket, 1);

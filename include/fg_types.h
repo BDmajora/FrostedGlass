@@ -107,6 +107,23 @@ struct fg_server {
      * on the desktop shows Win32 cursors regardless of toolkit. */
     struct fg_cursor_override *cursor_override;
 
+    /* === Simple universal cursor (no protocol required) ===
+     *
+     * The last *real* cursor image a client set via wl_pointer.set_cursor.
+     * In a Wine desktop this is always Wine's authentic Win32 bitmap
+     * (arrow/I-beam/resize/etc.), because Wine owns every window.
+     *
+     * We "promote" it to the system cursor and re-apply it whenever the
+     * compositor would otherwise fall back to the bare wlroots/xcursor
+     * image — e.g. focus gaps, or a window that never sets a cursor.
+     * This keeps the authentic Win32 cursor on screen at all times
+     * without any Wine-side cooperation. */
+    struct wlr_surface *system_cursor_surface;
+    int system_cursor_hotspot_x;
+    int system_cursor_hotspot_y;
+    struct wl_listener system_cursor_destroy;
+    bool have_system_cursor;
+
     /* Deferred refocus — when multiple surfaces are destroyed in a
      * burst (common with Wine control panels), we defer refocus to
      * an idle callback so all destroys are processed first.  This

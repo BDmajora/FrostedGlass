@@ -91,12 +91,43 @@ static const char *parse_args(int argc, char *argv[]) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Global filter — hide protocols we don't want Wine to use           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Block wp_cursor_shape_manager_v1 from being advertised to clients.
+ *
+ * When this protocol is available, Wine's Wayland driver uses it to ask
+ * the compositor to render a cursor shape by name (e.g. "default") from
+ * the compositor's own xcursor theme.  This means the user sees the Linux
+ * cursor theme instead of Wine's Win32 cursor.
+ *
+ * By hiding this protocol, Wine falls back to uploading its own cursor
+ * bitmap via wl_pointer_set_cursor(), which gives us the authentic Win32
+ * arrow/resize/wait cursors — exactly what a Windows desktop should show.
+ */
+static bool global_filter(const struct wl_client *client,
+    const struct wl_global *global, void *data) {
+    (void)client;
+    (void)data;
+
+    const char *iface = wl_global_get_interface(global)->name;
+    if (strcmp(iface, "wp_cursor_shape_manager_v1") == 0)
+        return false;
+
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
 /* Server initialization                                              */
 /* ------------------------------------------------------------------ */
 
 static bool server_init(struct fg_server *server) {
     server->display = wl_display_create();
     assert(server->display);
+
+    /* Hide protocols we don't want Wine to see (see global_filter). */
+    wl_display_set_global_filter(server->display, global_filter, NULL);
 
     server->backend = wlr_backend_autocreate(
         wl_display_get_event_loop(server->display), NULL);

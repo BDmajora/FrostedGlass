@@ -54,6 +54,7 @@
 #include "fg_input.h"
 #include "fg_wine.h"
 #include "fg_cursor_override.h"
+#include "fg_boot_cursor.h"
 
 /* ------------------------------------------------------------------ */
 /* Argument parsing                                                   */
@@ -222,6 +223,11 @@ static bool server_init(struct fg_server *server) {
             "Win32 cursor hijacking disabled");
     }
 
+    /* Sticky Win32 cursor: list links must be valid before first use so
+     * track_cursor_surface()'s wl_list_remove() is always safe. */
+    wl_list_init(&server->tracked_cursor_commit.link);
+    wl_list_init(&server->tracked_cursor_destroy.link);
+
     return true;
 }
 
@@ -238,6 +244,12 @@ static void server_finish(struct fg_server *server) {
     wl_display_destroy_clients(server->display);
 
     cursor_override_destroy(server->cursor_override);
+
+    /* Release our owned Win32 cursor buffer lock, if any. */
+    if (server->system_cursor_buffer) {
+        wlr_buffer_unlock(server->system_cursor_buffer);
+        server->system_cursor_buffer = NULL;
+    }
 
     wlr_scene_node_destroy(&server->scene->tree.node);
     wlr_xcursor_manager_destroy(server->cursor_mgr);
@@ -290,15 +302,49 @@ int main(int argc, char *argv[]) {
     wlr_log(WLR_INFO, "frostedglass running on Wayland display %s", socket);
 
     /*
-     * Set an initial cursor image immediately so the pointer is never
-     * blank or stuck on a garbage image during boot.  This is replaced
-     * by Wine's authentic Win32 cursor as soon as Wine sets one (and the
-     * compositor then keeps reusing that real cursor).  Load the theme's
-     * cursor at scale 1 first so the image is ready.
+     * Set the boot cursor BEFORE the first frame.
+     *
+     * Instead of the wlroots xcursor "default" (which flashes a Linux
+     * pointer until Wine's first set_cursor), we install a compositor-owned
+     * Win32 arrow built into the binary.  It is on screen from frame zero,
+     * independent of Wine timing and mouse motion, and is seamlessly
+     * replaced by Wine's authentic arrow the moment Wine sets one (see the
+     * capture path in fg_input.c, which swaps server.system_cursor_buffer).
+     *
+     * We also stash it as the system cursor so any focus gap before Wine
+     * is ready falls back to the Win32 arrow, never to xcursor.
+     *
+     * The xcursor manager is still loaded as a last-ditch fallback in case
+     * boot-cursor allocation ever fails (apply_system_cursor handles that).
      */
     wlr_xcursor_manager_load(server.cursor_mgr, 1.0f);
-    wlr_cursor_set_xcursor(server.cursor, server.cursor_mgr, "default");
-    wlr_log(WLR_INFO, "CURSOR-DBG: initial boot cursor set ('default')");
+
+    int boot_hx = 0, boot_hy = 0;
+    struct wlr_buffer *boot_cursor =
+        fg_boot_cursor_create(&boot_hx, &boot_hy);
+    if (boot_cursor) {
+        wlr_cursor_set_buffer(server.cursor, boot_cursor,
+            boot_hx, boot_hy, 1.0f);
+
+        /* Keep our own lock so it survives as the fallback image, then
+         * drop the creator reference (the cursor + our lock keep it
+         * alive; it is freed once Wine's real cursor replaces it). */
+        server.system_cursor_buffer = wlr_buffer_lock(boot_cursor);
+        server.system_cursor_hotspot_x = boot_hx;
+        server.system_cursor_hotspot_y = boot_hy;
+        server.system_cursor_scale = 1.0f;
+        server.have_system_cursor = true;
+        wlr_buffer_drop(boot_cursor);
+
+        wlr_log(WLR_INFO,
+            "CURSOR-DBG: initial boot cursor set (embedded Win32 arrow)");
+    } else {
+        /* Allocation failed — fall back to the xcursor theme so we at
+         * least show *a* pointer. */
+        wlr_cursor_set_xcursor(server.cursor, server.cursor_mgr, "default");
+        wlr_log(WLR_ERROR,
+            "CURSOR-DBG: boot cursor alloc failed — using xcursor default");
+    }
 
     /* Store in our own env so respawn_wine_explorer can find it */
     setenv("WAYLAND_DISPLAY", socket, 1);

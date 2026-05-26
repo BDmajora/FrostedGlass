@@ -1,8 +1,4 @@
 # frostedglass — Makefile
-#
-# Build: make
-# Install: sudo make install
-# Clean: make clean
 
 CC           ?= gcc
 PKG_CONFIG   ?= pkg-config
@@ -46,8 +42,7 @@ MODULE_SRCS := $(SRCDIR)/fg_output.c          \
                $(SRCDIR)/fg_desktop.c         \
                $(SRCDIR)/fg_input.c           \
                $(SRCDIR)/fg_wine.c            \
-               $(SRCDIR)/fg_cursor_override.c \
-               $(SRCDIR)/fg_boot_cursor.c
+               $(SRCDIR)/fg_cursor_override.c
 
 MODULE_OBJS := $(MODULE_SRCS:.c=.o)
 
@@ -106,17 +101,6 @@ clean:
 	rm -f $(BIN) *.o $(SRCDIR)/*.o
 	rm -f xdg-shell-protocol.h xdg-shell-protocol.c
 	rm -f yetios-cursor-v1-protocol.h yetios-cursor-v1-protocol.c
-	rm -f yetios-cursor-v1-client-protocol.h yetios-cursor-v1-client-protocol.c
-
-# Generate client-side protocol headers for Wine patching.
-# Not needed by the compositor build, but useful for the Wine side.
-wine-client-headers: yetios-cursor-v1-client-protocol.h yetios-cursor-v1-client-protocol.c
-
-yetios-cursor-v1-client-protocol.h: $(YETIOS_CURSOR_XML)
-	$(WAYLAND_SCANNER) client-header $< $@
-
-yetios-cursor-v1-client-protocol.c: $(YETIOS_CURSOR_XML) yetios-cursor-v1-client-protocol.h
-	$(WAYLAND_SCANNER) private-code $< $@
 
 install: $(BIN)
 	install -Dm755 $(BIN) $(DESTDIR)$(BINDIR)/$(BIN)

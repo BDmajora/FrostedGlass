@@ -29,15 +29,6 @@
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_shell.h>
 
-/*
- * NOTE:
- * Do NOT include <wlr/types/wlr_surface.h>.
- *
- * wlroots exposes struct wlr_surface through other headers already,
- * and some distro packages (including your wlroots-0.20 layout)
- * do not ship a standalone wlr_surface.h header path.
- */
-
 /* Forward declarations */
 struct fg_server;
 struct fg_output;
@@ -110,91 +101,41 @@ struct fg_server {
     /* Taskbar tracking */
     struct fg_toplevel *taskbar;
 
-    /*
-     * Desktop root window (desktop.exe).
-     *
-     * A fullscreen Wine surface that paints the wallpaper and lives
-     * beneath all application windows.
-     */
+    /* Desktop root window (desktop.exe) */
     struct fg_toplevel *desktop;
 
-    /*
-     * Startup fallback background.
-     *
-     * Visible only before desktop.exe maps.
-     */
+    /* Startup fallback background (before desktop.exe maps) */
     struct wlr_scene_rect *background_rect;
 
     pid_t wine_pid;
 
-    /*
-     * Wine virtual desktop resolution string.
-     * Example: "1920x1080"
-     */
+    /* Wine virtual desktop resolution string, e.g. "1920x1080" */
     const char *wine_desktop_res;
 
     /* ------------------------------------------------------------------ */
-    /* Win32 cursor override subsystem                                    */
+    /* Win32 cursor — THE cursor.  Set once by Wine, stored forever.      */
     /* ------------------------------------------------------------------ */
 
+    /* yetios_cursor_manager_v1 protocol handler */
     struct fg_cursor_override *cursor_override;
 
     /*
-     * Last authentic Win32 cursor surface uploaded by Wine.
+     * Permanent compositor-owned cursor buffer.
      *
-     * Used as sticky fallback so wlroots never reverts to the Linux
-     * xcursor theme during focus gaps.
-     */
-    struct wlr_surface *system_cursor_surface;
-
-    int system_cursor_hotspot_x;
-    int system_cursor_hotspot_y;
-
-    struct wl_listener system_cursor_destroy;
-
-    bool have_system_cursor;
-
-    /* ------------------------------------------------------------------ */
-    /* Boot / sticky cursor buffer                                        */
-    /* ------------------------------------------------------------------ */
-
-    /*
-     * Persistent compositor-owned cursor buffer.
-     *
-     * Initially contains the embedded Win32-style boot arrow.
-     * Later replaced with Wine's real cursor buffers.
-     *
-     * We keep our own lock on this buffer so it survives across
-     * temporary focus gaps and surface destruction races.
+     * Set by fg_cursor_override.c when Wine sends its cursor at boot.
+     * Applied via wlr_cursor_set_buffer() everywhere.
+     * Never freed until compositor shutdown.
      */
     struct wlr_buffer *system_cursor_buffer;
-
-    /*
-     * Scale associated with system_cursor_buffer.
-     */
+    int system_cursor_hotspot_x;
+    int system_cursor_hotspot_y;
     float system_cursor_scale;
-
-    /*
-     * Tracked Wine cursor surface listeners.
-     *
-     * These are used by fg_input.c when promoting a Wine cursor
-     * surface into the compositor-wide sticky cursor.
-     *
-     * IMPORTANT:
-     * These listeners MUST exist in the struct because main.c
-     * initializes their wl_list links before first use.
-     */
-    struct wl_listener tracked_cursor_commit;
-    struct wl_listener tracked_cursor_destroy;
+    bool have_system_cursor;
 
     /* ------------------------------------------------------------------ */
     /* Deferred refocus                                                   */
     /* ------------------------------------------------------------------ */
 
-    /*
-     * When Wine destroys multiple windows at once, we defer refocus
-     * until idle so we don't activate surfaces mid-destruction.
-     */
     bool refocus_pending;
 };
 

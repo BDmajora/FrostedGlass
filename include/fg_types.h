@@ -24,6 +24,7 @@
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_output_layout.h>
+#include <wlr/types/wlr_output_management_v1.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_xcursor_manager.h>
@@ -61,6 +62,11 @@ struct fg_server {
     struct wlr_scene_output_layout *scene_layout;
 
     struct wlr_output_layout *output_layout;
+
+    /* wlr-output-management-v1 — lets wlr-randr read/change modes */
+    struct wlr_output_manager_v1 *output_mgr;
+    struct wl_listener output_mgr_apply;
+    struct wl_listener output_mgr_test;
 
     struct wl_list outputs;                 /* fg_output.link */
     struct wl_listener new_output;

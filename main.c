@@ -124,6 +124,9 @@ static bool server_init(struct fg_server *server) {
     server->new_output.notify = server_new_output;
     wl_signal_add(&server->backend->events.new_output, &server->new_output);
 
+    /* Output management — enables wlr-randr / desk.cpl mode control */
+    server_init_output_management(server);
+
     /* Scene graph */
     server->scene = wlr_scene_create();
     server->scene_layout =

@@ -12,6 +12,7 @@
 #include <time.h>
 
 #include <wlr/types/wlr_output.h>
+#include <wlr/types/wlr_output_management_v1.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/util/log.h>
 
@@ -52,6 +53,9 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 
     /* Resize background to remaining outputs */
     server_update_background(server);
+
+    /* Notify wlr-randr clients of the change */
+    server_send_output_config(server);
 }
 
 /* ------------------------------------------------------------------ */
@@ -171,4 +175,132 @@ void server_new_output(struct wl_listener *listener, void *data) {
 
     /* (Re-)create or resize the desktop background to cover all outputs */
     server_update_background(server);
+
+    /* Notify wlr-randr clients of the new output */
+    server_send_output_config(server);
+}
+
+/* ------------------------------------------------------------------ */
+/* wlr-output-management-v1 — lets wlr-randr control outputs         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Push a snapshot of every output's current state to all
+ * wlr-output-management-v1 clients.  This is what wlr-randr reads.
+ */
+void server_send_output_config(struct fg_server *server) {
+    struct wlr_output_configuration_v1 *config;
+    struct fg_output *output;
+
+    if (!server->output_mgr)
+        return;
+
+    config = wlr_output_configuration_v1_create();
+    if (!config) return;
+
+    wl_list_for_each(output, &server->outputs, link) {
+        wlr_output_configuration_head_v1_create(config,
+            output->wlr_output);
+    }
+
+    wlr_output_manager_v1_set_configuration(server->output_mgr, config);
+}
+
+/*
+ * Shared helper: apply or test an output configuration from wlr-randr.
+ */
+static void apply_or_test_config(struct fg_server *server,
+    struct wlr_output_configuration_v1 *config, bool test_only) {
+
+    struct wlr_output_configuration_head_v1 *head;
+    bool ok = true;
+
+    wl_list_for_each(head, &config->heads, link) {
+        struct wlr_output *wlr_output = head->state.output;
+        struct wlr_output_state state;
+        wlr_output_state_init(&state);
+
+        wlr_output_state_set_enabled(&state, head->state.enabled);
+
+        if (head->state.enabled) {
+            if (head->state.mode) {
+                wlr_output_state_set_mode(&state, head->state.mode);
+            } else {
+                wlr_output_state_set_custom_mode(&state,
+                    head->state.custom_mode.width,
+                    head->state.custom_mode.height,
+                    head->state.custom_mode.refresh);
+            }
+
+            wlr_output_state_set_transform(&state, head->state.transform);
+            wlr_output_state_set_scale(&state, head->state.scale);
+            wlr_output_state_set_adaptive_sync_enabled(&state,
+                head->state.adaptive_sync_enabled);
+        }
+
+        if (test_only) {
+            ok = wlr_output_test_state(wlr_output, &state) && ok;
+        } else {
+            ok = wlr_output_commit_state(wlr_output, &state) && ok;
+        }
+
+        wlr_output_state_finish(&state);
+    }
+
+    if (ok)
+        wlr_output_configuration_v1_send_succeeded(config);
+    else
+        wlr_output_configuration_v1_send_failed(config);
+
+    wlr_output_configuration_v1_destroy(config);
+
+    if (!test_only) {
+        server_update_background(server);
+        server_send_output_config(server);
+    }
+}
+
+static void handle_output_mgr_apply(struct wl_listener *listener,
+    void *data) {
+    struct fg_server *server =
+        wl_container_of(listener, server, output_mgr_apply);
+    struct wlr_output_configuration_v1 *config = data;
+
+    wlr_log(WLR_INFO, "wlr-output-mgmt: apply request");
+    apply_or_test_config(server, config, false);
+}
+
+static void handle_output_mgr_test(struct wl_listener *listener,
+    void *data) {
+    struct fg_server *server =
+        wl_container_of(listener, server, output_mgr_test);
+    struct wlr_output_configuration_v1 *config = data;
+
+    wlr_log(WLR_DEBUG, "wlr-output-mgmt: test request");
+    apply_or_test_config(server, config, true);
+}
+
+/*
+ * Create the output management global and wire up listeners.
+ * Call once from server_init(), after wlr_output_layout_create().
+ */
+void server_init_output_management(struct fg_server *server) {
+    server->output_mgr =
+        wlr_output_manager_v1_create(server->display);
+    if (!server->output_mgr) {
+        wlr_log(WLR_ERROR, "Failed to create output management");
+        return;
+    }
+
+    server->output_mgr_apply.notify = handle_output_mgr_apply;
+    wl_signal_add(&server->output_mgr->events.apply,
+        &server->output_mgr_apply);
+
+    server->output_mgr_test.notify = handle_output_mgr_test;
+    wl_signal_add(&server->output_mgr->events.test,
+        &server->output_mgr_test);
+
+    wlr_log(WLR_INFO,
+        "wlr-output-management-v1 enabled — "
+        "wlr-randr and desk.cpl can now control outputs");
 }

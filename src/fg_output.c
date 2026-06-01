@@ -17,8 +17,6 @@
 #include <wlr/util/log.h>
 
 #include "fg_output.h"
-#include "fg_taskbar.h"
-#include "fg_desktop.h"
 
 /* ------------------------------------------------------------------ */
 /* Per-output listener callbacks                                      */
@@ -78,52 +76,6 @@ bool server_get_screen_size(struct fg_server *server, int *w, int *h) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Shell window re-fit                                                */
-/* ------------------------------------------------------------------ */
-
-/*
- * Re-fit the screen-spanning shell windows (the desktop.exe wallpaper and
- * the taskbar) to the current output geometry.
- *
- * This runs whenever the usable screen size changes — a resolution change
- * applied through desk.cpl / wlr-randr, or an output being added/removed.
- *
- * Without it, the taskbar and desktop keep their old size and position
- * until Wine next commits those surfaces on its own (a clock tick, a
- * redraw).  That is the lag you can see after a resolution change: the bar
- * stays put, then jumps to the new bottom edge later, and never widens to
- * the new screen width.  Re-pinning here pushes a fresh xdg configure (with
- * the new width/height) to Wine the instant the mode changes, so Wine
- * repaints both windows at the correct size immediately.
- *
- * Z-order is deliberately preserved.  The caller (server_update_background)
- * lowers the fallback rect to the bottom first; we then re-pin the desktop,
- * which lowers it to the bottom *after* the rect — matching the boot-time
- * order and keeping the desktop above the fallback rect.  The taskbar is
- * only repositioned/resized, never raised or lowered, so we cannot bury the
- * focused window (the same reason position_taskbar avoids raising).
- */
-static void reposition_shell_windows(struct fg_server *server) {
-    struct fg_toplevel *desktop = server->desktop;
-    if (desktop &&
-        desktop->xdg_toplevel &&
-        desktop->xdg_toplevel->base &&
-        desktop->xdg_toplevel->base->surface &&
-        desktop->xdg_toplevel->base->surface->mapped) {
-        position_desktop(desktop);
-    }
-
-    struct fg_toplevel *taskbar = server->taskbar;
-    if (taskbar &&
-        taskbar->xdg_toplevel &&
-        taskbar->xdg_toplevel->base &&
-        taskbar->xdg_toplevel->base->surface &&
-        taskbar->xdg_toplevel->base->surface->mapped) {
-        position_taskbar(taskbar);
-    }
-}
-
-/* ------------------------------------------------------------------ */
 /* Desktop background                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -176,14 +128,6 @@ void server_update_background(struct fg_server *server) {
         wlr_log(WLR_INFO, "Fallback background rect resized: %dx%d",
             total_w, total_h);
     }
-
-    /*
-     * Re-fit the screen-spanning shell windows (desktop + taskbar) in the
-     * same pass that re-fits the fallback rect.  This is what makes a
-     * resolution change take effect immediately, instead of leaving the
-     * taskbar at its old size/position until Wine's next commit.
-     */
-    reposition_shell_windows(server);
 }
 
 /* ------------------------------------------------------------------ */

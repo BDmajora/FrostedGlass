@@ -221,15 +221,15 @@ void launch_wine(struct fg_server *server, const char *socket) {
         /* Apply registry prefs (taskbar position, DPI, etc.) */
         apply_registry_prefs();
 
-        const char *res = server->wine_desktop_res;
-        if (res) {
-            char desktop_arg[128];
-            snprintf(desktop_arg, sizeof(desktop_arg),
-                "/desktop=shell,%s", res);
-            execlp("wine", "wine", "explorer", desktop_arg, NULL);
-        } else {
-            execlp("wine", "wine", "explorer", "/desktop=shell", NULL);
-        }
+        /* Launch the shell ROOTLESS — no fixed virtual-desktop size.  A fixed
+         * /desktop=shell,WxH pins the Win32 screen to a virtual desktop that
+         * swallows wlr-randr resolution changes (no WM_DISPLAYCHANGE, laggy or
+         * failed upscaling).  Rootless makes the Win32 screen track the live
+         * wl_output, so resolution changes fire a native WM_DISPLAYCHANGE and
+         * the taskbar/desktop resize promptly.  wine_desktop_res is ignored on
+         * purpose; the compositor remains the sole owner of the output mode. */
+        (void)server->wine_desktop_res;
+        execlp("wine", "wine", "explorer", "/desktop=shell", NULL);
         _exit(127);
     }
     server->wine_pid = pid;

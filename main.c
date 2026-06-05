@@ -28,6 +28,7 @@
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_output_layout.h>
+#include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_subcompositor.h>
@@ -126,6 +127,19 @@ static bool server_init(struct fg_server *server) {
 
     /* Output management — enables wlr-randr / desk.cpl mode control */
     server_init_output_management(server);
+
+    /*
+     * xdg-output manager.  Wine binds zxdg_output_manager_v1 and prefers it
+     * for output geometry; without it Wine never receives a runtime
+     * logical-size/done for the output, so its wayland_output current_mode is
+     * never refreshed after a resolution change and the virtual-desktop resize
+     * (and thus WM_DISPLAYCHANGE / the taskbar refit) only happens when
+     * desk.cpl calls ChangeDisplaySettings on OK.  Bound to the layout, this
+     * re-sends logical size to clients automatically whenever an output's mode
+     * changes, which drives Wine's wayland_output_done the instant the mode
+     * changes — no OK required.
+     */
+    wlr_xdg_output_manager_v1_create(server->display, server->output_layout);
 
     /* Scene graph */
     server->scene = wlr_scene_create();

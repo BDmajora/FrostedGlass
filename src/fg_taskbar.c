@@ -82,6 +82,15 @@ void position_taskbar(struct fg_toplevel *toplevel) {
     wlr_scene_node_set_position(&toplevel->scene_tree->node,
         0, target_y);
 
+    /* Mark the taskbar as tiled (pinned to all edges).  Without a state
+     * flag, Wine's wayland_configure_window() ignores the size hint
+     * ("Ignore size hints if we don't have a state that requires strict
+     * size adherence") and the taskbar only resizes after the slow async
+     * display-device re-enumeration completes.  Setting tiled makes Wine
+     * respect the size immediately on the configure path. */
+    wlr_xdg_toplevel_set_tiled(toplevel->xdg_toplevel,
+        WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
+
     /* Hint Wine to use the full screen width */
     wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, screen_w, bar_h);
 

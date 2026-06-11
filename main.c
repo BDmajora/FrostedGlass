@@ -41,6 +41,7 @@
 #include "fg_toplevel.h"
 #include "fg_input.h"
 #include "fg_wine.h"
+#include "fg_audio.h"
 #include "fg_cursor_override.h"
 
 /* ------------------------------------------------------------------ */
@@ -195,6 +196,8 @@ static void server_finish(struct fg_server *server) {
         waitpid(server->wine_pid, NULL, 0);
     }
 
+    shutdown_audio(server);
+
     wl_display_destroy_clients(server->display);
 
     cursor_override_destroy(server->cursor_override);
@@ -268,6 +271,9 @@ int main(int argc, char *argv[]) {
             wlr_log(WLR_INFO, "Auto-detected resolution: %s", auto_res);
         }
     }
+
+    /* Audio stack must be up before Wine probes its audio drivers */
+    launch_audio(&server);
 
     launch_wine(&server, socket);
 

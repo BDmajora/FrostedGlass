@@ -42,6 +42,7 @@ MODULE_SRCS := $(SRCDIR)/fg_output.c          \
                $(SRCDIR)/fg_desktop.c         \
                $(SRCDIR)/fg_input.c           \
                $(SRCDIR)/fg_wine.c            \
+               $(SRCDIR)/fg_audio.c           \
                $(SRCDIR)/fg_cursor_override.c
 
 MODULE_OBJS := $(MODULE_SRCS:.c=.o)

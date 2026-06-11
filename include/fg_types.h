@@ -115,6 +115,10 @@ struct fg_server {
 
     pid_t wine_pid;
 
+    /* Audio stack daemons (owned by fg_audio.c) */
+    pid_t pipewire_pid;
+    pid_t wireplumber_pid;
+
     /* Wine virtual desktop resolution string, e.g. "1920x1080" */
     const char *wine_desktop_res;
 

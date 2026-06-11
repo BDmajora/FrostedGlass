@@ -52,6 +52,18 @@ static void sigchld_handler(int sig) {
                 "this is normal, Wine services continue running",
                 WEXITSTATUS(status));
         }
+        if (g_server && pid == g_server->pipewire_pid) {
+            wlr_log(WLR_ERROR,
+                "pipewire exited (status %d) — Wine audio is dead; "
+                "see /tmp/pipewire.log", WEXITSTATUS(status));
+            g_server->pipewire_pid = 0;
+        }
+        if (g_server && pid == g_server->wireplumber_pid) {
+            wlr_log(WLR_ERROR,
+                "wireplumber exited (status %d) — no session manager; "
+                "see /tmp/wireplumber.log", WEXITSTATUS(status));
+            g_server->wireplumber_pid = 0;
+        }
     }
 }
 

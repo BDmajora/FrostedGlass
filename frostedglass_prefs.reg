@@ -105,3 +105,46 @@ Windows Registry Editor Version 5.00
 ; or auto-detected from the output.
 [HKEY_CURRENT_USER\Software\Wine\Explorer\Desktops]
 "Default"=""
+
+; =======================================================================
+; Sound scheme — system event sounds from C:\windows\Media
+; =======================================================================
+
+; Wires the system event sounds (synthesized into C:\windows\Media at
+; first-boot prefix creation by gen-media.py) to the standard AppEvents
+; registry layout that mmsys.cpl's Sounds tab and PlaySound() consume.
+; Replace the .wav files in C:\windows\Media to retheme — no registry
+; changes needed.
+
+[HKEY_CURRENT_USER\AppEvents\Schemes\Apps\.Default\.Default\.Current]
+@="C:\\windows\\Media\\ding.wav"
+
+[HKEY_CURRENT_USER\AppEvents\Schemes\Apps\.Default\SystemAsterisk\.Current]
+@="C:\\windows\\Media\\ding.wav"
+
+[HKEY_CURRENT_USER\AppEvents\Schemes\Apps\.Default\SystemExclamation\.Current]
+@="C:\\windows\\Media\\chord.wav"
+
+[HKEY_CURRENT_USER\AppEvents\Schemes\Apps\.Default\SystemHand\.Current]
+@="C:\\windows\\Media\\chord.wav"
+
+[HKEY_CURRENT_USER\AppEvents\Schemes\Apps\.Default\SystemNotification\.Current]
+@="C:\\windows\\Media\\ding.wav"
+
+[HKEY_CURRENT_USER\AppEvents\Schemes\Apps\.Default\SystemQuestion\.Current]
+@="C:\\windows\\Media\\ding.wav"
+
+[HKEY_CURRENT_USER\AppEvents\Schemes\Apps\.Default\WindowsLogon\.Current]
+@="C:\\windows\\Media\\tada.wav"
+
+[HKEY_CURRENT_USER\AppEvents\Schemes\Apps\.Default\WindowsLogoff\.Current]
+@="C:\\windows\\Media\\chord.wav"
+
+[HKEY_CURRENT_USER\AppEvents\Schemes\Apps\.Default\DeviceConnect\.Current]
+@="C:\\windows\\Media\\ding.wav"
+
+[HKEY_CURRENT_USER\AppEvents\Schemes\Apps\.Default\DeviceDisconnect\.Current]
+@="C:\\windows\\Media\\chord.wav"
+
+[HKEY_CURRENT_USER\AppEvents\Schemes\Apps\.Default\MailBeep\.Current]
+@="C:\\windows\\Media\\ding.wav"

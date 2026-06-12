@@ -180,6 +180,49 @@ static void ensure_wine_prefix(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* System event sounds (C:\windows\Media)                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Synthesize the system event sounds into the NT file structure —
+ * C:\windows\Media inside the prefix — by running the generator
+ * installed at /usr/lib/yetios/gen-media.py.  That directory is the
+ * canonical, user-visible location (replace the .wav files there to
+ * retheme); nothing is stored in the Linux tree.  The generator skips
+ * files that already exist, so this is idempotent and theme-safe.
+ */
+static void ensure_prefix_media(void) {
+    const char *home = getenv("HOME");
+    char media_dir[512], probe[600];
+
+    if (!home) return;
+
+    snprintf(media_dir, sizeof(media_dir),
+        "%s/.wine/drive_c/windows/Media", home);
+    snprintf(probe, sizeof(probe), "%s/ding.wav", media_dir);
+
+    if (access(probe, F_OK) == 0) return;
+
+    wlr_log(WLR_INFO, "Generating system sounds into %s ...", media_dir);
+
+    pid_t gen_pid = fork();
+    if (gen_pid == 0) {
+        execlp("python3", "python3", "/usr/lib/yetios/gen-media.py",
+               media_dir, NULL);
+        _exit(127);
+    }
+    if (gen_pid > 0) {
+        int status;
+        waitpid(gen_pid, &status, 0);
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+            wlr_log(WLR_INFO, "System sounds generated");
+        else
+            wlr_log(WLR_ERROR, "gen-media.py exited with status %d",
+                WEXITSTATUS(status));
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Wine launcher                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -229,6 +272,9 @@ void launch_wine(struct fg_server *server, const char *socket) {
 
         /* Ensure prefix exists before doing anything else */
         ensure_wine_prefix();
+
+        /* System event sounds into C:\windows\Media (idempotent) */
+        ensure_prefix_media();
 
         /* Apply registry prefs (taskbar position, DPI, etc.) */
         apply_registry_prefs();

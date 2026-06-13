@@ -17,6 +17,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <stdlib.h>
+#include <unistd.h>
 
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_data_device.h>
@@ -32,6 +33,34 @@
 #include "fg_toplevel.h"
 
 /* ------------------------------------------------------------------ */
+/* Spawn a helper program (developer terminal, etc.)                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * fork()+execlp a program as a detached child.  WAYLAND_DISPLAY and
+ * XDG_RUNTIME_DIR are already in the compositor's environment (set in
+ * main.c after the socket is created), so the child inherits them and
+ * connects back to us as a normal Wayland client.  The child is reaped
+ * by the shared SIGCHLD handler installed in fg_wine.c — its pid matches
+ * none of the tracked daemons, so it's simply zombie-collected.
+ */
+static void spawn_program(const char *prog) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        wlr_log(WLR_ERROR, "fork() failed spawning %s", prog);
+        return;
+    }
+    if (pid == 0) {
+        /* New session: don't tie the child to the compositor's process
+         * group / controlling terminal. */
+        setsid();
+        execlp(prog, prog, (char *)NULL);
+        _exit(127);
+    }
+    wlr_log(WLR_INFO, "Spawned %s (pid %d)", prog, pid);
+}
+
+/* ------------------------------------------------------------------ */
 /* Compositor keybindings                                             */
 /* ------------------------------------------------------------------ */
 
@@ -44,6 +73,18 @@ static bool handle_compositor_keybinding(struct fg_server *server,
             return true;
         }
     }
+
+    /* Ctrl+Alt+T — open the foot terminal (developer/debug shell).
+     * Requires both Ctrl and Alt so plain Ctrl+T stays free for Win32
+     * apps (e.g. a browser's "new tab"). */
+    if ((modifiers & (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT)) ==
+        (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT)) {
+        if (sym == XKB_KEY_t || sym == XKB_KEY_T) {
+            spawn_program("foot");
+            return true;
+        }
+    }
+
     return false;
 }
 

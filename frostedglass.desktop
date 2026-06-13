@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=Frosted Glass
 Comment=YetiOS Windows-like desktop (Wine + minimal Wayland compositor)
-Exec=frostedglass
+Exec=dbus-run-session frostedglass
 Type=Application
 DesktopNames=FrostedGlass

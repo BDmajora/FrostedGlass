@@ -122,9 +122,33 @@ void launch_audio(struct fg_server *server) {
     }
     wlr_log(WLR_INFO, "wireplumber launched (pid %d)",
         server->wireplumber_pid);
+
+    /* pipewire-pulse: the PulseAudio-protocol shim. Native PipeWire clients
+     * (Moonshine via winepipewire.drv) bypass it entirely, but pulse-API apps
+     * — Chrome, Firefox, anything on libpulse/cubeb — connect through it. With
+     * it absent they get "PulseAudio: Connection refused", and the ALSA
+     * `default` fallback is itself the pulse plugin, so that fails too.
+     * Spawn last: it connects to the running pipewire daemon. Non-fatal —
+     * native-PipeWire audio (the Win32 surfaces) is unaffected if it fails. */
+    server->pipewire_pulse_pid =
+        spawn_daemon("pipewire-pulse", "/tmp/pipewire-pulse.log");
+    if (server->pipewire_pulse_pid <= 0) {
+        wlr_log(WLR_ERROR,
+            "Failed to spawn pipewire-pulse — pulse-API apps "
+            "(browsers, etc.) will have no audio");
+    } else {
+        wlr_log(WLR_INFO, "pipewire-pulse launched (pid %d)",
+            server->pipewire_pulse_pid);
+    }
 }
 
 void shutdown_audio(struct fg_server *server) {
+    /* Tear down in reverse dependency order: pulse shim first (it rides on
+     * pipewire), then wireplumber, then pipewire itself. */
+    if (server->pipewire_pulse_pid > 0) {
+        kill(server->pipewire_pulse_pid, SIGTERM);
+        server->pipewire_pulse_pid = 0;
+    }
     if (server->wireplumber_pid > 0) {
         kill(server->wireplumber_pid, SIGTERM);
         server->wireplumber_pid = 0;

@@ -391,6 +391,64 @@ static void clamp_above_taskbar(
 }
 
 /* ------------------------------------------------------------------ */
+/* Tray applet flyouts (e.g. the volume flyout)                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A tray flyout is the small popup an applet opens above the notification
+ * area (Windows 7 behaviour).  Under Wayland a normal xdg_toplevel cannot
+ * place itself, so the compositor must position it — exactly like the
+ * taskbar and desktop.
+ *
+ * The volume flyout is sndvol.exe's compact window.  sndvol.exe also hosts
+ * the full mixer ("Volume Mixer - <device>"), so we key on the flyout's
+ * exact title ("Volume") to tell the two apart — the same way the taskbar
+ * is separated from other explorer.exe windows.  Adding another applet's
+ * flyout later is just another app_id/title pair here.
+ */
+static bool is_flyout(struct fg_toplevel *toplevel) {
+    struct wlr_xdg_toplevel *xt = toplevel->xdg_toplevel;
+    if (!xt) return false;
+
+    const char *app_id = xt->app_id;
+    const char *title  = xt->title;
+    if (!app_id || !title) return false;
+
+    if (strcmp(app_id, "sndvol.exe") != 0 &&
+        strcmp(app_id, "Sndvol.exe") != 0 &&
+        strcmp(app_id, "SNDVOL.EXE") != 0)
+        return false;
+
+    return strcmp(title, "Volume") == 0;
+}
+
+/*
+ * Pin a flyout to the bottom-right, just above the taskbar — where the
+ * tray applet that summoned it lives.  Right-aligned with a small gap,
+ * matching the Windows 7 volume flyout.  Stateless: safe to re-assert on
+ * every commit.
+ */
+static void position_flyout(struct fg_toplevel *toplevel) {
+    struct fg_server *server = toplevel->server;
+
+    int screen_w, screen_h;
+    if (!server_get_screen_size(server, &screen_w, &screen_h)) return;
+
+    struct wlr_box geo;
+    fg_xdg_surface_get_geometry(toplevel->xdg_toplevel->base, &geo);
+    if (geo.width <= 0 || geo.height <= 0) return;
+
+    int bar_h = get_taskbar_height(server);
+
+    int x = screen_w - geo.width - 4;
+    int y = screen_h - bar_h - geo.height - 2;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+
+    wlr_scene_node_set_position(&toplevel->scene_tree->node, x, y);
+}
+
+/* ------------------------------------------------------------------ */
 /* Toplevel lifecycle                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -464,6 +522,16 @@ static void xdg_toplevel_map(
      */
     if (!server->desktop) {
         desktop_rescan_all(server);
+    }
+
+    if (is_flyout(toplevel)) {
+        position_flyout(toplevel);
+        wlr_scene_node_raise_to_top(
+            &toplevel->scene_tree->node);
+        focus_toplevel(toplevel);
+        wlr_log(WLR_INFO,
+            "Flyout pinned above the taskbar on map");
+        return;
     }
 
     try_center(toplevel);
@@ -610,6 +678,11 @@ static void xdg_toplevel_commit(
 
     if (toplevel->xdg_toplevel->current.fullscreen)
         return;
+
+    if (is_flyout(toplevel)) {
+        position_flyout(toplevel);
+        return;
+    }
 
     try_center(toplevel);
     clamp_above_taskbar(toplevel);
